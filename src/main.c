@@ -44,7 +44,7 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #define DEVICE_NAME_LEN	(sizeof(DEVICE_NAME) - 1)
 
 #define RUN_STATUS_LED DK_LED1
-#define RUN_LED_BLINK_INTERVAL 1000
+#define RUN_LED_BLINK_INTERVAL 50
 
 #define CON_STATUS_LED DK_LED2
 
@@ -601,6 +601,11 @@ static void configure_gpio(void)
 	}
 }
 
+static inline uint32_t now_ms(void)
+{
+	return k_uptime_get_32();
+}
+
 int main(void)
 {
 	int blink_status = 0;
@@ -650,7 +655,27 @@ int main(void)
 	advertising_start();
 
 	for (;;) {
-		dk_set_led(RUN_STATUS_LED, (++blink_status) % 2);
+		if(blink_status >= 10000) {
+			blink_status = 0;
+		} else {
+			blink_status++;
+		}
+		float value = (float)blink_status / 100.0f;
+		float cosine = 0.5f + (0.5f * cosf(value * 2.0f * 3.14159265f));
+		int   result = (int)(cosine * 1000.0f);
+		
+		dk_set_led(RUN_STATUS_LED, blink_status % 2);
+		// Create and send a test message over BLE UART
+		struct uart_data_t *test_buf = k_malloc(sizeof(*test_buf));
+		if (test_buf) {
+			test_buf->len = snprintf(test_buf->data, sizeof(test_buf->data),
+									 "%d %d\r\n", now_ms(), result);
+			if (test_buf->len > 0 && test_buf->len < sizeof(test_buf->data)) {
+				k_fifo_put(&fifo_uart_rx_data, test_buf);
+			} else {
+				k_free(test_buf);
+			}
+		}
 		k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
 	}
 }
