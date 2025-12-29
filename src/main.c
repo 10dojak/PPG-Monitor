@@ -34,6 +34,8 @@
 
 #include <zephyr/logging/log.h>
 
+#include "max86140_spi.h"
+
 #define LOG_MODULE_NAME peripheral_uart
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
@@ -447,7 +449,6 @@ static void auth_passkey_confirm(struct bt_conn *conn, unsigned int passkey)
 	}
 }
 
-
 static void auth_cancel(struct bt_conn *conn)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
@@ -457,7 +458,6 @@ static void auth_cancel(struct bt_conn *conn)
 	LOG_INF("Pairing cancelled: %s", addr);
 }
 
-
 static void pairing_complete(struct bt_conn *conn, bool bonded)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
@@ -466,7 +466,6 @@ static void pairing_complete(struct bt_conn *conn, bool bonded)
 
 	LOG_INF("Pairing completed: %s, bonded: %d", addr, bonded);
 }
-
 
 static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
 {
@@ -606,6 +605,57 @@ static inline uint32_t now_ms(void)
 	return k_uptime_get_32();
 }
 
+// Transmit a single piece of numerical data over BLE UART
+// 32-bit maximum
+const char** tag_table = {
+	"PPG1 LEDC1",
+	"PPG1 LEDC2",
+	"PPG1 LEDC3",
+	"PPG1 LEDC4",
+	"PPG1 LEDC5",
+	"PPG1 LEDC6",
+	"PPG2 LEDC1",
+	"PPG2 LEDC2",
+	"PPG2 LEDC3",
+	"PPG2 LEDC4",
+	"PPG2 LEDC5",
+	"PPG2 LEDC6",
+	"PPF1 LEDC1",
+	"PPF1 LEDC2",
+	"PPF1 LEDC3",
+	"Reserved",
+	"Reserved",
+	"Reserved",
+	"PPF2 LEDC1",
+	"PPF2 LEDC2",
+	"PPF2 LEDC3",
+	"Reserved",
+	"Reserved",
+	"Reserved",
+	"PROX1 DATA",
+	"PROX2 DATA",
+	"Reserved",
+	"Reserved",
+	"Reserved",
+	"INVALID",
+	"TIMESTAMP"
+};
+void al_transmit_data(uint32_t data, uint8_t fifo_count){
+	uint8_t t = data >> 19;		 // 5-bit Tag at [23:19]
+	uint32_t o = data & 0x7FFFF; // 19-bit Optical Data
+	// Create and send a test message over BLE UART
+	struct uart_data_t *test_buf = k_malloc(sizeof(*test_buf));
+	if (test_buf) {
+		test_buf->len = snprintf(test_buf->data, sizeof(test_buf->data),
+									"%u %u %u\r\n", t, o, fifo_count);
+		if (test_buf->len > 0 && test_buf->len < sizeof(test_buf->data)) {
+			k_fifo_put(&fifo_uart_rx_data, test_buf);
+		} else {
+			k_free(test_buf);
+		}
+	}
+}
+
 int main(void)
 {
 	int blink_status = 0;
@@ -654,29 +704,33 @@ int main(void)
 	k_work_init(&adv_work, adv_work_handler);
 	advertising_start();
 
+	max86140_spi_init();
+	max86140_init();
+	static uint32_t fifo_data_buf[128];
 	for (;;) {
-		if(blink_status >= 10000) {
-			blink_status = 0;
-		} else {
-			blink_status++;
-		}
-		float value = (float)blink_status / 100.0f;
-		float cosine = 0.5f + (0.5f * cosf(value * 2.0f * 3.14159265f));
-		int   result = (int)(cosine * 1000.0f);
-		
-		dk_set_led(RUN_STATUS_LED, blink_status % 2);
-		// Create and send a test message over BLE UART
-		struct uart_data_t *test_buf = k_malloc(sizeof(*test_buf));
-		if (test_buf) {
-			test_buf->len = snprintf(test_buf->data, sizeof(test_buf->data),
-									 "%d %d\r\n", now_ms(), result);
-			if (test_buf->len > 0 && test_buf->len < sizeof(test_buf->data)) {
-				k_fifo_put(&fifo_uart_rx_data, test_buf);
-			} else {
-				k_free(test_buf);
+		// if(blink_status >= 10000) {
+		// 	blink_status = 0;
+		// } else {
+		// 	blink_status++;
+		// }
+		// Read Part ID from 0xFF
+		// max86140_spi_write(0xFF, 0x00);
+		// al_transmit_data(max86140_spi_read(0xFF));
+		// max86140_single_sample_poll_and_store();
+		// Read while Afull
+		uint8_t sample_count = 0;
+		max86140_exhaust_fifo(fifo_data_buf, &sample_count);
+		if (sample_count > 0) 
+			for (uint8_t i = 0; i < sample_count; i++) {
+				al_transmit_data(fifo_data_buf[i], i);
 			}
-		}
-		k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
+	
+		dk_set_led(RUN_STATUS_LED, 0);
+		if (sample_count < 50) k_sleep(K_MSEC(4*50));
+		else                   k_sleep(K_MSEC(4));
+		dk_set_led(RUN_STATUS_LED, 1);
+		// dk_set_led(RUN_STATUS_LED, blink_status % 2);
+		// k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
 	}
 }
 

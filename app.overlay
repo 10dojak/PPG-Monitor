@@ -8,4 +8,24 @@
 	chosen {
 		nordic,nus-uart = &uart0;
 	};
+    arduino_pins {
+        compatible = "gpio-keys";
+        a0: a0 {
+            gpios = <&arduino_header 0 GPIO_ACTIVE_HIGH>;
+            label = "A0";
+        };
+        a1: a1 {
+            gpios = <&arduino_header 1 GPIO_ACTIVE_HIGH>;
+            label = "A1";
+        };
+        a2: a2 {
+            gpios = <&arduino_header 2 GPIO_ACTIVE_HIGH>;
+            label = "A2";
+        };
+        a3: a3 {
+            gpios = <&arduino_header 3 GPIO_ACTIVE_HIGH>;
+            label = "A3";
+        };
+    };
 };
+

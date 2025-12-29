@@ -11,6 +11,7 @@ project(peripheral_uart_test)
 # NORDIC SDK APP START
 target_sources(app PRIVATE
   src/main.c
+  src/max86140_spi.c
 )
 
 # NORDIC SDK APP END
