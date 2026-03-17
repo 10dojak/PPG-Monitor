@@ -656,6 +656,19 @@ void al_transmit_data(uint32_t data, uint8_t fifo_count){
 	}
 }
 
+void ble_print(char* str){
+	struct uart_data_t *test_buf = k_malloc(sizeof(*test_buf));
+	if (test_buf) {
+		test_buf->len = snprintf(test_buf->data, sizeof(test_buf->data),
+									"%s\r\n", str);
+		if (test_buf->len > 0 && test_buf->len < sizeof(test_buf->data)) {
+			k_fifo_put(&fifo_uart_rx_data, test_buf);
+		} else {
+			k_free(test_buf);
+		}
+	}
+}
+
 int main(void)
 {
 	int blink_status = 0;
@@ -706,8 +719,11 @@ int main(void)
 
 	max86140_spi_init();
 	max86140_init();
+
 	static uint32_t fifo_data_buf[128];
 	for (;;) {
+		// Print hello message over BLE UART
+		// ble_print("Hello from MAX86140 PPG Sensor!");	
 		// if(blink_status >= 10000) {
 		// 	blink_status = 0;
 		// } else {
@@ -715,9 +731,20 @@ int main(void)
 		// }
 		// Read Part ID from 0xFF
 		// max86140_spi_write(0xFF, 0x00);
-		// al_transmit_data(max86140_spi_read(0xFF));
+		// al_transmit_data(max86140_spi_read(0xFF),0);
 		// max86140_single_sample_poll_and_store();
 		// Read while Afull
+
+		// uint8_t part_id = max86140_read_part_id();
+		// char* str_buf = k_malloc(64);
+		// if (str_buf) {
+		// 	int len = snprintf(str_buf, 64, "Part ID: %u", part_id);
+		// 	if (len > 0 && len < 64) {
+		// 		ble_print(str_buf);
+		// 	}
+		// 	k_free(str_buf);
+		// }
+
 		uint8_t sample_count = 0;
 		max86140_exhaust_fifo(fifo_data_buf, &sample_count);
 		if (sample_count > 0) 
@@ -729,6 +756,8 @@ int main(void)
 		if (sample_count < 50) k_sleep(K_MSEC(4*50));
 		else                   k_sleep(K_MSEC(4));
 		dk_set_led(RUN_STATUS_LED, 1);
+
+
 		// dk_set_led(RUN_STATUS_LED, blink_status % 2);
 		// k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
 	}

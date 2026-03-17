@@ -13,23 +13,33 @@
 #define A1_NODE DT_NODELABEL(a1)
 #define A2_NODE DT_NODELABEL(a2)
 #define A3_NODE DT_NODELABEL(a3)
+#define A4_NODE DT_NODELABEL(a4)
 static const struct gpio_dt_spec a0 = GPIO_DT_SPEC_GET(A0_NODE, gpios);
 static const struct gpio_dt_spec a1 = GPIO_DT_SPEC_GET(A1_NODE, gpios);
 static const struct gpio_dt_spec a2 = GPIO_DT_SPEC_GET(A2_NODE, gpios);
 static const struct gpio_dt_spec a3 = GPIO_DT_SPEC_GET(A3_NODE, gpios);
+static const struct gpio_dt_spec a4 = GPIO_DT_SPEC_GET(A4_NODE, gpios);
 
 // GPIO control macros
 // This method is still quite slow due to all the Zephyr bloat.
 // Maximum toggle rate is just a few MHz.
 // To make this go faster, consider writing directly to the GPIO registers, 
 // or use hardware SPI.
-#define CSN_ON()    gpio_pin_set_dt(&a0, 1)
-#define CSN_OFF()   gpio_pin_set_dt(&a0, 0)
-#define MOSI_ON()   gpio_pin_set_dt(&a1, 1)
-#define MOSI_OFF()  gpio_pin_set_dt(&a1, 0)
-#define SCK_ON()    gpio_pin_set_dt(&a3, 1)
-#define SCK_OFF()   gpio_pin_set_dt(&a3, 0)
-#define MISO_READ() gpio_pin_get_dt(&a2)
+
+//              J1  Header
+// ACC_INT_N    1   
+// CSOPT_N      3   A2
+// MISO         5   A3
+// SCK          7   A1
+// MOSI         9   A4
+
+#define CSN_ON()    gpio_pin_set_dt(&a2, 1)
+#define CSN_OFF()   gpio_pin_set_dt(&a2, 0)
+#define MOSI_ON()   gpio_pin_set_dt(&a4, 1)
+#define MOSI_OFF()  gpio_pin_set_dt(&a4, 0)
+#define SCK_ON()    gpio_pin_set_dt(&a1, 1)
+#define SCK_OFF()   gpio_pin_set_dt(&a1, 0)
+#define MISO_READ() gpio_pin_get_dt(&a3)
 
 // CSN Delay function
 // k_sleep is a bit slow, using assembly NOP allows more precise timing control
@@ -40,10 +50,10 @@ inline static void _SPI_DELAY(const uint32_t cycles){
 
 // Initialize GPIOs for MAX86140 Software SPI
 void    max86140_spi_init (void){
-    gpio_pin_configure_dt(&a0, GPIO_OUTPUT_HIGH);
     gpio_pin_configure_dt(&a1, GPIO_OUTPUT_HIGH);
-    gpio_pin_configure_dt(&a3, GPIO_OUTPUT_HIGH);
-    gpio_pin_configure_dt(&a2, GPIO_INPUT | GPIO_PULL_DOWN);
+    gpio_pin_configure_dt(&a2, GPIO_OUTPUT_HIGH);
+    gpio_pin_configure_dt(&a4, GPIO_OUTPUT_HIGH);
+    gpio_pin_configure_dt(&a3, GPIO_INPUT | GPIO_PULL_DOWN);
 
 }
 #define SPI_DELAY_CYCLES 50
