@@ -7,11 +7,27 @@
 /** @file
  *  @brief Nordic UART Bridge Service (NUS) sample
  */
+
+/*
+ * Updated July 2026 — Rutendo Jakachira (rutendo_jakachira@brown.edu):
+ * - Added al_transmit_data(): streams MAX86141 FIFO samples over BLE NUS          [Rutendo Jakachira, rutendo_jakachira@brown.edu]
+ *     Format: "tag value slotIdx\r\n"
+ *     tag     = MAX86141 FIFO tag bits [23:19] (identifies LED+PD combination)
+ *     value   = 19-bit ADC optical count
+ *     slotIdx = batch position (0-11 = U10, 128-139 = U2)
+ * - Added al_transmit_accel(): streams LSM6DSOTR IMU data over BLE NUS            [Rutendo Jakachira, rutendo_jakachira@brown.edu]
+ *     Format: "0 encoded_value slotIdx\r\n"
+ *     slotIdx = 200 (X), 201 (Y), 202 (Z)
+ *     encoded = accel_cm_s2 + 20000 (offset to keep unsigned)
+ * - Main loop transmits last 12 U10 + last 12 U2 samples per 200ms cycle          [Rutendo Jakachira, rutendo_jakachira@brown.edu]
+ * - IMU polled at ~26 Hz, transmitted once per 200ms loop                         [Rutendo Jakachira, rutendo_jakachira@brown.edu]
+ */
 #include <uart_async_adapter.h>
 
 #include <zephyr/types.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/usb/usb_device.h>
 
 #include <zephyr/device.h>
@@ -33,8 +49,13 @@
 #include <string.h>
 
 #include <zephyr/logging/log.h>
+#include <zephyr/drivers/sensor.h>
 
 #include "max86140_spi.h"
+
+/* ── LSM6DSOTR accelerometer ───────────────────────────────────────────────── */
+#define IMU_NODE DT_NODELABEL(lsm6dsotr)
+static const struct device *imu_dev;
 
 #define LOG_MODULE_NAME peripheral_uart
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
@@ -74,6 +95,26 @@ struct uart_data_t {
 
 static K_FIFO_DEFINE(fifo_uart_tx_data);
 static K_FIFO_DEFINE(fifo_uart_rx_data);
+
+/* Transmit one axis of acceleration over BLE NUS.
+ * slot_idx: 200=X, 201=Y, 202=Z.
+ * Value is accel in cm/s² offset by +20000 to keep it unsigned:
+ *   encoded = (val1*100 + val2/10000) + 20000
+ * Receiver undoes: accel_cm_s2 = value - 20000  */
+static void al_transmit_accel(int32_t accel_cm_s2, uint8_t slot_idx)
+{
+	uint32_t encoded = (uint32_t)(accel_cm_s2 + 20000);
+	struct uart_data_t *buf = k_malloc(sizeof(*buf));
+	if (buf) {
+		buf->len = snprintf(buf->data, sizeof(buf->data),
+				    "0 %u %u\r\n", encoded, (uint32_t)slot_idx);
+		if (buf->len > 0 && buf->len < sizeof(buf->data)) {
+			k_fifo_put(&fifo_uart_rx_data, buf);
+		} else {
+			k_free(buf);
+		}
+	}
+}
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -338,7 +379,10 @@ static int uart_init(void)
 
 static void adv_work_handler(struct k_work *work)
 {
-	int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+	int err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE,
+					BT_GAP_ADV_FAST_INT_MIN_2,
+					BT_GAP_ADV_FAST_INT_MAX_2, NULL),
+				  ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
 
 	if (err) {
 		LOG_ERR("Advertising failed to start (err %d)", err);
@@ -542,6 +586,8 @@ static struct bt_nus_cb nus_cb = {
 	.received = bt_receive_cb,
 };
 
+/* bt_ready callback not used — bt_enable(NULL) blocks until ready */
+
 void error(void)
 {
 	dk_set_leds_state(DK_ALL_LEDS_MSK, DK_NO_LEDS_MSK);
@@ -607,39 +653,6 @@ static inline uint32_t now_ms(void)
 
 // Transmit a single piece of numerical data over BLE UART
 // 32-bit maximum
-const char** tag_table = {
-	"PPG1 LEDC1",
-	"PPG1 LEDC2",
-	"PPG1 LEDC3",
-	"PPG1 LEDC4",
-	"PPG1 LEDC5",
-	"PPG1 LEDC6",
-	"PPG2 LEDC1",
-	"PPG2 LEDC2",
-	"PPG2 LEDC3",
-	"PPG2 LEDC4",
-	"PPG2 LEDC5",
-	"PPG2 LEDC6",
-	"PPF1 LEDC1",
-	"PPF1 LEDC2",
-	"PPF1 LEDC3",
-	"Reserved",
-	"Reserved",
-	"Reserved",
-	"PPF2 LEDC1",
-	"PPF2 LEDC2",
-	"PPF2 LEDC3",
-	"Reserved",
-	"Reserved",
-	"Reserved",
-	"PROX1 DATA",
-	"PROX2 DATA",
-	"Reserved",
-	"Reserved",
-	"Reserved",
-	"INVALID",
-	"TIMESTAMP"
-};
 void al_transmit_data(uint32_t data, uint8_t fifo_count){
 	uint8_t t = data >> 19;		 // 5-bit Tag at [23:19]
 	uint32_t o = data & 0x7FFFF; // 19-bit Optical Data
@@ -656,110 +669,175 @@ void al_transmit_data(uint32_t data, uint8_t fifo_count){
 	}
 }
 
-void ble_print(char* str){
-	struct uart_data_t *test_buf = k_malloc(sizeof(*test_buf));
-	if (test_buf) {
-		test_buf->len = snprintf(test_buf->data, sizeof(test_buf->data),
-									"%s\r\n", str);
-		if (test_buf->len > 0 && test_buf->len < sizeof(test_buf->data)) {
-			k_fifo_put(&fifo_uart_rx_data, test_buf);
-		} else {
-			k_free(test_buf);
-		}
-	}
-}
-
 int main(void)
 {
-	int blink_status = 0;
 	int err = 0;
 
 	configure_gpio();
 
-	err = uart_init();
-	if (err) {
-		error();
-	}
-
-	if (IS_ENABLED(CONFIG_BT_NUS_SECURITY_ENABLED)) {
-		err = bt_conn_auth_cb_register(&conn_auth_callbacks);
-		if (err) {
-			LOG_ERR("Failed to register authorization callbacks. (err: %d)", err);
-			return 0;
-		}
-
-		err = bt_conn_auth_info_cb_register(&conn_auth_info_callbacks);
-		if (err) {
-			LOG_ERR("Failed to register authorization info callbacks. (err: %d)", err);
-			return 0;
-		}
-	}
+	/* uart_init() intentionally skipped — Proto2403 has no physical UART.
+	 * All host communication is via BLE NUS.  The async UART driver with
+	 * RTS/CTS configured on floating pins can block or corrupt boot flow. */
 
 	err = bt_enable(NULL);
 	if (err) {
+		LOG_ERR("bt_enable failed (err %d)", err);
 		error();
 	}
-
 	LOG_INF("Bluetooth initialized");
-
-	k_sem_give(&ble_init_ok);
-
-	if (IS_ENABLED(CONFIG_SETTINGS)) {
-		settings_load();
-	}
 
 	err = bt_nus_init(&nus_cb);
 	if (err) {
-		LOG_ERR("Failed to initialize UART service (err: %d)", err);
+		LOG_ERR("Failed to initialize NUS (err: %d)", err);
 		return 0;
 	}
+	LOG_INF("NUS initialized");
 
-	k_work_init(&adv_work, adv_work_handler);
-	advertising_start();
+	/* Advertise directly — avoid workqueue indirection that can silently fail */
+	err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE,
+					BT_GAP_ADV_FAST_INT_MIN_2,
+					BT_GAP_ADV_FAST_INT_MAX_2, NULL),
+				ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+	if (err) {
+		LOG_ERR("Advertising failed to start (err %d)", err);
+	} else {
+		LOG_INF("Advertising started as " CONFIG_BT_DEVICE_NAME);
+	}
+
+	/* Now signal ble_write_thread that NUS is ready */
+	k_sem_give(&ble_init_ok);
+
+	/* Enable Proto2403 power rails */
+	static const struct gpio_dt_spec tps = GPIO_DT_SPEC_GET(DT_NODELABEL(tps_en), gpios);
+	static const struct gpio_dt_spec mcp = GPIO_DT_SPEC_GET(DT_NODELABEL(mcp_en), gpios);
+	gpio_pin_configure_dt(&tps, GPIO_OUTPUT_HIGH);
+	gpio_pin_configure_dt(&mcp, GPIO_OUTPUT_HIGH);
+	k_sleep(K_MSEC(50));
+	LOG_INF("Power rails enabled");
+
+	/* ── LSM6DSOTR init ─────────────────────────────────────────────────────
+	 * Drive SA0/SDO (P0.22) LOW before the I2C bus is probed so the chip
+	 * presents address 0x6A consistently.  Must happen before device_is_ready()
+	 * because the Zephyr I2C driver probes the address at init time.           */
+	static const struct gpio_dt_spec imu_sa0 =
+		GPIO_DT_SPEC_GET(DT_NODELABEL(imu_sa0), gpios);
+	gpio_pin_configure_dt(&imu_sa0, GPIO_OUTPUT_LOW);   /* SA0=0 → addr 0x6A */
+
+	imu_dev = DEVICE_DT_GET(IMU_NODE);
+	if (!device_is_ready(imu_dev)) {
+		LOG_ERR("LSM6DSOTR not ready — check I2C (SCL=P0.24 SDA=P0.16 addr=0x6A)");
+		imu_dev = NULL;
+	} else {
+		LOG_INF("LSM6DSOTR ready — accel ±2g @ 26 Hz, INT=P1.11");
+	}
 
 	max86140_spi_init();
+	LOG_INF("SPI init done");
 	max86140_init();
+	LOG_INF("U10 (primary) sensor init done");
+	max86141_u2_init();
+	LOG_INF("U2 (mux controller) init done - streaming PPG Red/IR/Green");
 
-	static uint32_t fifo_data_buf[128];
+	/* Read Part ID to confirm SPI is actually talking to the sensor */
+	uint8_t part_id = max86140_read_part_id();
+	LOG_INF("MAX86141 Part ID: 0x%02x (expect 0x24)", part_id);
+
+	static uint32_t fifo_data_buf[128];   /* U10 FIFO buffer */
+	static uint32_t fifo_u2_buf[128];     /* U2  FIFO buffer */
+	uint32_t loop = 0;
+
+	/* Log tag histogram once at startup after the first FIFO fill (~1s) */
+	k_sleep(K_MSEC(1000));
+	{
+		uint8_t sc = 0, sc2 = 0;
+		max86140_exhaust_fifo(fifo_data_buf, &sc);
+		max86141_u2_exhaust_fifo(fifo_u2_buf, &sc2);
+		LOG_INF("=== Startup tag histogram — U10 (%u samples) ===", sc);
+		max86140_log_tag_histogram(fifo_data_buf, sc);
+		LOG_INF("=== Startup tag histogram — U2  (%u samples) ===", sc2);
+		max86140_log_tag_histogram(fifo_u2_buf, sc2);
+	}
+
 	for (;;) {
-		// Print hello message over BLE UART
-		// ble_print("Hello from MAX86140 PPG Sensor!");	
-		// if(blink_status >= 10000) {
-		// 	blink_status = 0;
-		// } else {
-		// 	blink_status++;
-		// }
-		// Read Part ID from 0xFF
-		// max86140_spi_write(0xFF, 0x00);
-		// al_transmit_data(max86140_spi_read(0xFF),0);
-		// max86140_single_sample_poll_and_store();
-		// Read while Afull
-
-		// uint8_t part_id = max86140_read_part_id();
-		// char* str_buf = k_malloc(64);
-		// if (str_buf) {
-		// 	int len = snprintf(str_buf, 64, "Part ID: %u", part_id);
-		// 	if (len > 0 && len < 64) {
-		// 		ble_print(str_buf);
-		// 	}
-		// 	k_free(str_buf);
-		// }
-
-		uint8_t sample_count = 0;
+		uint8_t sample_count = 0, sample_count_u2 = 0;
 		max86140_exhaust_fifo(fifo_data_buf, &sample_count);
-		if (sample_count > 0) 
-			for (uint8_t i = 0; i < sample_count; i++) {
-				al_transmit_data(fifo_data_buf[i], i);
+		max86141_u2_exhaust_fifo(fifo_u2_buf, &sample_count_u2);
+
+		/* Every 5 loops (~1s) log FIFO summary */
+		if ((loop % 5) == 0) {
+			LOG_INF("U10 FIFO=%u  U2 FIFO=%u  conn=%s",
+				sample_count, sample_count_u2,
+				(current_conn != NULL) ? "yes" : "no");
+			for (uint8_t i = 0; i < sample_count && i < 12; i++) {
+				uint8_t  tag = (uint8_t)((fifo_data_buf[i] >> 19) & 0x1F);
+				uint32_t val = fifo_data_buf[i] & 0x7FFFFu;
+				LOG_INF("  U10 slot[%u] tag%02u val=%6u", i, tag, val);
 			}
-	
-		dk_set_led(RUN_STATUS_LED, 0);
-		if (sample_count < 50) k_sleep(K_MSEC(4*50));
-		else                   k_sleep(K_MSEC(4));
-		dk_set_led(RUN_STATUS_LED, 1);
+			for (uint8_t i = 0; i < sample_count_u2 && i < 12; i++) {
+				uint8_t  tag = (uint8_t)((fifo_u2_buf[i] >> 19) & 0x1F);
+				uint32_t val = fifo_u2_buf[i] & 0x7FFFFu;
+				LOG_INF("  U2  slot[%u] tag%02u val=%6u", i, tag, val);
+			}
+		}
 
+		/* Every 25 loops (~5s) dump full tag histograms */
+		if ((loop % 25) == 0) {
+			if (sample_count > 0) {
+				LOG_INF("--- U10 histogram ---");
+				max86140_log_tag_histogram(fifo_data_buf, sample_count);
+			}
+			if (sample_count_u2 > 0) {
+				LOG_INF("--- U2 histogram ---");
+				max86140_log_tag_histogram(fifo_u2_buf, sample_count_u2);
+			}
+		}
 
-		// dk_set_led(RUN_STATUS_LED, blink_status % 2);
-		// k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
+		loop++;
+
+		/* ── LSM6DSOTR poll — fetch every loop (26 Hz IMU, 200ms loop → ~5 new) ── */
+		if (imu_dev != NULL) {
+			struct sensor_value ax, ay, az;
+			int rc = sensor_sample_fetch(imu_dev);
+			if (rc == 0) {
+				sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_X, &ax);
+				sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_Y, &ay);
+				sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_Z, &az);
+
+				/* Log every 5 loops (~1s) */
+				if ((loop % 5) == 0) {
+					LOG_INF("IMU accel X=%d.%02d Y=%d.%02d Z=%d.%02d m/s²",
+						ax.val1, abs(ax.val2) / 10000,
+						ay.val1, abs(ay.val2) / 10000,
+						az.val1, abs(az.val2) / 10000);
+				}
+
+				if (current_conn != NULL) {
+					/* Convert to cm/s² integer: val1*100 + val2/10000 */
+					int32_t x_cm = ax.val1 * 100 + ax.val2 / 10000;
+					int32_t y_cm = ay.val1 * 100 + ay.val2 / 10000;
+					int32_t z_cm = az.val1 * 100 + az.val2 / 10000;
+					al_transmit_accel(x_cm, 200); /* slot 200 = X */
+					al_transmit_accel(y_cm, 201); /* slot 201 = Y */
+					al_transmit_accel(z_cm, 202); /* slot 202 = Z */
+				}
+			} else {
+				LOG_WRN("IMU fetch failed (err %d)", rc);
+			}
+		}
+
+		if (current_conn != NULL) {
+			/* Transmit only the most recent complete cycle (12 slots) from U10.
+			 * Sending all 60 accumulated samples floods the BLE NUS TX queue and
+			 * causes bt_nus_send() to fail on every packet. One cycle = 12 samples. */
+			uint8_t u10_start = (sample_count > 12) ? sample_count - 12 : 0;
+			for (uint8_t i = u10_start; i < sample_count; i++)
+				al_transmit_data(fifo_data_buf[i], (uint8_t)(i - u10_start));
+			/* U2 similarly — indices 128..139 reserved for chip-1 data */
+			uint8_t u2_start = (sample_count_u2 > 12) ? sample_count_u2 - 12 : 0;
+			for (uint8_t i = u2_start; i < sample_count_u2; i++)
+				al_transmit_data(fifo_u2_buf[i], (uint8_t)(128u + i - u2_start));
+		}
+		k_sleep(K_MSEC(200));
 	}
 }
 

@@ -4,33 +4,139 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
-/ {
-	chosen {
-		nordic,nus-uart = &uart0;
-	};
-    arduino_pins {
-        compatible = "gpio-keys";
-        a0: a0 {
-            gpios = <&arduino_header 0 GPIO_ACTIVE_HIGH>;
-            label = "A0";
-        };
-        a1: a1 {
-            gpios = <&arduino_header 1 GPIO_ACTIVE_HIGH>;
-            label = "A1";
-        };
-        a2: a2 {
-            gpios = <&arduino_header 2 GPIO_ACTIVE_HIGH>;
-            label = "A2";
-        };
-        a3: a3 {
-            gpios = <&arduino_header 3 GPIO_ACTIVE_HIGH>;
-            label = "A3";
-        };
+#include <dt-bindings/pinctrl/nrf-pinctrl.h>
 
-        a4: a4 {
-            gpios = <&arduino_header 4 GPIO_ACTIVE_HIGH>;
-            label = "A4";
+/*
+ * Remap uart0 TX away from P0.06 — the nrf52840dk board DTS puts uart0 TX on
+ * P0.06 by default, which conflicts with MAX_CSB1 also on P0.06.
+ * On Proto2403 physical UART is unused (all comms via BLE NUS), so we move
+ * TX to P1.00 which is free.  RTS/CTS/RX stay on their original pins.
+ */
+&pinctrl {
+    /* ── LSM6DSOTR I2C0 ──────────────────────────────────────────────────────
+     * SCL    = P0.24
+     * SDA    = P0.16
+     * SDO/SA0= P0.22  (driven LOW by firmware → I2C addr 0x6A;
+     *                   change reg to 0x6b and drive HIGH for 0x6B)
+     * INT    = P1.11  (data-ready interrupt — wired to drdy-gpios below)
+     * ─────────────────────────────────────────────────────────────────────── */
+    i2c0_default_alt: i2c0_default_alt {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SCL, 0, 24)>,   /* P0.24 — IMU SCL */
+                    <NRF_PSEL(TWIM_SDA, 0, 16)>;   /* P0.16 — IMU SDA */
+            bias-pull-up;
+        };
+    };
+    i2c0_sleep_alt: i2c0_sleep_alt {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SCL, 0, 24)>,
+                    <NRF_PSEL(TWIM_SDA, 0, 16)>;
+            low-power-enable;
+        };
+    };
+
+    uart0_default_alt: uart0_default_alt {
+        group1 {
+            psels = <NRF_PSEL(UART_TX,  1,  0)>,   /* P1.00 — free on Proto2403 */
+                    <NRF_PSEL(UART_RTS, 0,  5)>;
+        };
+        group2 {
+            psels = <NRF_PSEL(UART_RX,  0,  8)>,
+                    <NRF_PSEL(UART_CTS, 0,  7)>;
+            bias-pull-up;
+        };
+    };
+    uart0_sleep_alt: uart0_sleep_alt {
+        group1 {
+            psels = <NRF_PSEL(UART_TX,  1,  0)>,
+                    <NRF_PSEL(UART_RTS, 0,  5)>;
+            low-power-enable;
+        };
+        group2 {
+            psels = <NRF_PSEL(UART_RX,  0,  8)>,
+                    <NRF_PSEL(UART_CTS, 0,  7)>;
+            low-power-enable;
         };
     };
 };
 
+&uart0 {
+    pinctrl-0 = <&uart0_default_alt>;
+    pinctrl-1 = <&uart0_sleep_alt>;
+    pinctrl-names = "default", "sleep";
+};
+
+/*
+ * The nrf52840dk board DTS marks several pins as reserved-GPIO because they
+ * are used for board peripherals (UART, QSPI flash, NFC).  On Proto2403 none
+ * of those peripherals are present, so we lift all the software-imposed
+ * reservations except the hardware-mandated crystal pins (P0.00-P0.01).
+ *
+ * Original board reserved ranges that we remove:
+ *   <0x6 0x1>  — P0.06 (was uart0 TX, now remapped to P1.00)
+ *   <0x8 0x3>  — P0.08-P0.10 (uart0 RX, NFC1, NFC2 — none used on Proto2403)
+ *   <0x11 0x7> — P0.17-P0.23 (QSPI flash — not present on Proto2403)
+ */
+&gpio0 {
+    gpio-reserved-ranges = <0 2>;   /* keep only P0.00-P0.01 (crystal oscillator) */
+};
+
+/* ── LSM6DSOTR I2C0 controller ─────────────────────────────────────────────── */
+&i2c0 {
+    compatible = "nordic,nrf-twim";
+    status = "okay";
+    pinctrl-0 = <&i2c0_default_alt>;
+    pinctrl-1 = <&i2c0_sleep_alt>;
+    pinctrl-names = "default", "sleep";
+    clock-frequency = <I2C_BITRATE_FAST>;   /* 400 kHz */
+
+    lsm6dsotr: lsm6dsotr@6a {
+        compatible = "st,lsm6dso";          /* LSM6DSOTR is register-compatible */
+        reg = <0x6a>;                       /* SA0/SDO = P0.22 driven LOW → 0x6A */
+        /* drdy-gpios removed — NCS 2.9.0 binding doesn't declare this property.
+         * Using TRIGGER_NONE (polling) instead; INT pin (P1.11) left unused.
+         * If trigger is needed later, try irq-gpios = <&gpio1 11 GPIO_ACTIVE_HIGH>
+         * (older NCS naming) and switch to CONFIG_LSM6DSO_TRIGGER_GLOBAL_THREAD=y */
+    };
+};
+
+/ {
+    chosen {
+        nordic,nus-uart = &uart0;
+    };
+    proto2403_pins {
+        compatible = "gpio-keys";
+        max_sclk: max_sclk {
+            gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;  /* P0.15 — Proto2403 SCLK */
+            label = "MAX_SCLK";
+        };
+        max_sdi: max_sdi {
+            gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;   /* P0.06 — Proto2403 SDI (MOSI) */
+            label = "MAX_SDI";
+        };
+        max_sdo: max_sdo {
+            gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;  /* P0.12 — Proto2403 SDO (MISO) */
+            label = "MAX_SDO";
+        };
+        max_csb1: max_csb1 {
+            gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;  /* P0.17 — Proto2403 CSB1 (U10 primary) */
+            label = "MAX_CSB1";
+        };
+        max_csb2: max_csb2 {
+            gpios = <&gpio0 27 GPIO_ACTIVE_HIGH>;  /* P0.27 — Proto2403 CSB2 (U2 secondary, ISP1807 pad39) */
+            label = "MAX_CSB2";
+        };
+        tps_en: tps_en {
+            gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;
+            label = "TPS_EN";
+        };
+        mcp_en: mcp_en {
+            gpios = <&gpio0 31 GPIO_ACTIVE_HIGH>;  /* P0.31/AIN7 — MCP16411 VLED enable */
+            label = "MCP_EN";
+        };
+        imu_sa0: imu_sa0 {
+            gpios = <&gpio0 22 GPIO_ACTIVE_HIGH>;  /* P0.22 — LSM6DSOTR SDO/SA0 (LOW=0x6A) */
+            label = "IMU_SA0";
+        };
+    };
+};
