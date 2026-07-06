@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PPG Monitor — 24-Channel</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+  background: #dce8f5;
+  min-height: 100vh;
+  padding: 24px;
+  color: #111827;
+}
+
+/* Header */
+.header {
+  display: flex; align-items: flex-start;
+  justify-content: space-between; margin-bottom: 24px;
+}
+.header-left h1 { font-size: 2rem; font-weight: 700; color: #111827; }
+.header-left p  { font-size: 0.9rem; color: #6b7280; margin-top: 2px; }
+.header-right   { display: flex; gap: 10px; align-items: center; }
+
+.btn-settings {
+  display: flex; align-items: center; gap: 6px;
+  background: white; border: 1.5px solid #e5e7eb;
+  border-radius: 10px; padding: 8px 16px;
+  font-size: 0.85rem; font-weight: 500; color: #374151; cursor: pointer;
+}
+.btn-live {
+  display: flex; align-items: center; gap: 8px;
+  background: #111827; color: white; border: none;
+  border-radius: 10px; padding: 8px 18px;
+  font-size: 0.85rem; font-weight: 600; cursor: pointer;
+}
+.btn-live .live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: white; opacity: 0.5; transition: opacity 0.3s;
+}
+.btn-live.connected .live-dot {
+  background: #4ade80; opacity: 1;
+  box-shadow: 0 0 6px #4ade80;
+  animation: livePulse 2s infinite;
+}
+@keyframes livePulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+/* Metric Cards */
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+@media(max-width:1000px){ .cards { grid-template-columns: repeat(2,1fr); } }
+@media(max-width:500px) { .cards { grid-template-columns: 1fr; } }
+
+.card {
+  background: white; border-radius: 16px;
+  padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+.card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.card-header svg { width: 20px; height: 20px; color: #374151; }
+.card-title { font-size: 1rem; font-weight: 600; color: #111827; }
+.card-sub   { font-size: 0.8rem; color: #9ca3af; margin-bottom: 14px; }
+.card-value { font-size: 2.4rem; font-weight: 700; color: #16a34a; line-height: 1; margin-bottom: 12px; }
+.card-value span { font-size: 1rem; font-weight: 500; color: #6b7280; margin-left: 4px; }
+.badge {
+  display: inline-block; background: #dcfce7;
+  color: #16a34a; font-size: 0.75rem; font-weight: 600;
+  padding: 4px 10px; border-radius: 20px;
+}
+.badge.warn { background: #fef3c7; color: #d97706; }
+.badge.err  { background: #fee2e2; color: #dc2626; }
+
+/* Chip status grid inside card */
+.chip-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;
+}
+.chip-cell {
+  background: #f9fafb; border-radius: 8px; padding: 8px 10px;
+}
+.chip-cell-label { font-size: 0.7rem; color: #9ca3af; margin-bottom: 2px; }
+.chip-cell-val   { font-size: 1rem; font-weight: 700; }
+.chip-cell-val.u10 { color: #3b82f6; }
+.chip-cell-val.u2  { color: #f59e0b; }
+
+/* Channel mini-grid */
+.ch-grid {
+  display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; margin-bottom: 12px;
+}
+.ch-cell { text-align: center; }
+.ch-label { font-size: 0.65rem; color: #9ca3af; margin-bottom: 2px; }
+.ch-val   { font-size: 0.9rem; font-weight: 700; }
+
+/* Tabs */
+.tabs {
+  display: flex; background: #e5e7eb;
+  border-radius: 12px; padding: 4px;
+  margin-bottom: 20px; gap: 4px;
+}
+.tab {
+  flex: 1; text-align: center; padding: 10px 0;
+  font-size: 0.9rem; font-weight: 500; color: #6b7280;
+  border-radius: 9px; cursor: pointer; transition: all 0.2s;
+}
+.tab.active {
+  background: white; color: #111827; font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* Chart card */
+.chart-card {
+  background: white; border-radius: 16px;
+  padding: 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+.chart-card-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 4px; }
+.chart-card h2 { font-size: 1.2rem; font-weight: 700; }
+.chart-card p  { font-size: 0.85rem; color: #9ca3af; margin-bottom: 20px; }
+.chart-wrap    { position: relative; height: 320px; }
+
+/* Channel selector — 4-column grid (IR, IR, Red, Red, Grn, Grn per row) */
+.ch-select {
+  display: grid;
+  grid-template-columns: repeat(4, auto);
+  gap: 6px 8px;
+  justify-content: start;
+}
+.ch-group-label {
+  grid-column: 1 / -1;
+  font-size: 0.7rem; font-weight: 600; color: #9ca3af;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin-top: 4px;
+}
+.ch-chip {
+  font-size: 0.75rem; font-weight: 600; padding: 4px 10px;
+  border-radius: 20px; border: 1.5px solid transparent;
+  cursor: pointer; transition: all 0.15s; white-space: nowrap;
+}
+.ch-chip.active { border-color: currentColor; }
+.ch-chip:not(.active) { opacity: 0.4; }
+
+/* 24-channel heatmap panel */
+.heat-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;
+}
+.heat-chip { background: white; border-radius: 16px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+.heat-chip h3 { font-size: 1rem; font-weight: 700; margin-bottom: 4px; }
+.heat-chip p  { font-size: 0.8rem; color: #9ca3af; margin-bottom: 16px; }
+.heat-slots {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px;
+}
+.heat-slot {
+  border-radius: 8px; padding: 6px 4px; text-align: center;
+  background: #f3f4f6; transition: background 0.3s;
+  cursor: default;
+}
+.heat-slot-label { font-size: 0.6rem; color: #6b7280; line-height: 1.2; }
+.heat-slot-val   { font-size: 0.75rem; font-weight: 700; margin-top: 2px; }
+
+/* Placeholder */
+.placeholder {
+  background: white; border-radius: 16px; padding: 40px;
+  text-align: center; color: #9ca3af;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+.placeholder h3 { font-size: 1rem; font-weight: 600; color: #6b7280; margin-top: 12px; }
+.placeholder p  { font-size: 0.85rem; margin-top: 6px; }
+
+/* Help */
+.help-btn {
+  position: fixed; bottom: 24px; right: 24px;
+  width: 40px; height: 40px; border-radius: 50%;
+  background: white; border: 1.5px solid #e5e7eb;
+  font-size: 1rem; color: #6b7280; cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* Connect Modal */
+.overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.4); z-index: 100;
+  align-items: center; justify-content: center;
+}
+.overlay.show { display: flex; }
+.modal {
+  background: white; border-radius: 20px;
+  padding: 28px; width: 320px; text-align: center;
+}
+.modal h3 { font-size: 1.1rem; font-weight: 700; margin-bottom: 8px; }
+.modal p  { font-size: 0.85rem; color: #6b7280; margin-bottom: 20px; }
+.modal-btn {
+  width: 100%; padding: 12px; border: none; border-radius: 10px;
+  font-size: 0.9rem; font-weight: 600; cursor: pointer; margin-bottom: 8px;
+}
+.modal-btn.primary   { background: #111827; color: white; }
+.modal-btn.secondary { background: #f3f4f6; color: #374151; }
+.ios-warn {
+  background: #fef3c7; border-radius: 10px; padding: 10px 12px;
+  font-size: 0.78rem; color: #92400e; margin-bottom: 16px; text-align:left;
+}
+
+@media(max-width:700px){ .heat-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <h1>PPG Monitor</h1>
+    <p>24-channel optical · PPG_DK_2026A · July 6, 2026</p>
+    <p style="font-size:0.8rem; color:#9ca3af; margin-top:4px;">Developed by Rutendo Jakachira · July 6, 2026</p>
+  </div>
+  <div class="header-right">
+    <button class="btn-settings" onclick="showConnect()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+      Settings
+    </button>
+    <button class="btn-live" id="liveBtn" onclick="showConnect()">
+      <div class="live-dot"></div>
+      Live
+    </button>
+  </div>
+</div>
+
+<!-- Metric Cards -->
+<div class="cards">
+  <!-- Heart Rate -->
+  <div class="card">
+    <div class="card-header">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+      </svg>
+      <span class="card-title">Heart Rate</span>
+    </div>
+    <div class="card-sub">IR·LED1 PD4 (U2 tag 9)</div>
+    <div class="card-value" id="hrValue">—<span>BPM</span></div>
+    <span class="badge" id="hrBadge">Waiting...</span>
+  </div>
+
+  <!-- SpO2 -->
+  <div class="card">
+    <div class="card-header">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
+      </svg>
+      <span class="card-title">SpO₂</span>
+    </div>
+    <div class="card-sub">Red·LED1 PD4 / IR·LED1 PD4 (U2 tags 7 &amp; 9)</div>
+    <div class="card-value" id="spo2Value">—<span>%</span></div>
+    <span class="badge" id="spo2Badge">Waiting...</span>
+  </div>
+
+  <!-- IR comparison across 4 PDs -->
+  <div class="card">
+    <div class="card-header">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>
+      </svg>
+      <span class="card-title">IR Signal — 4 PDs</span>
+    </div>
+    <div class="card-sub">Counts across both chips</div>
+    <div class="chip-grid">
+      <div class="chip-cell">
+        <div class="chip-cell-label">U10 · PD1</div>
+        <div class="chip-cell-val u10" id="irU10P1">—</div>
+      </div>
+      <div class="chip-cell">
+        <div class="chip-cell-label">U10 · PD2</div>
+        <div class="chip-cell-val u10" id="irU10P2">—</div>
+      </div>
+      <div class="chip-cell">
+        <div class="chip-cell-label">U2 · PD1</div>
+        <div class="chip-cell-val u2" id="irU2P1">—</div>
+      </div>
+      <div class="chip-cell">
+        <div class="chip-cell-label">U2 · PD2</div>
+        <div class="chip-cell-val u2" id="irU2P2">—</div>
+      </div>
+    </div>
+    <span class="badge" id="ppgBadge">Waiting...</span>
+  </div>
+
+  <!-- Chip health -->
+  <div class="card">
+    <div class="card-header">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+      <span class="card-title">Chip Status</span>
+    </div>
+    <div class="card-sub">Packet counts since connect</div>
+    <div class="chip-grid">
+      <div class="chip-cell">
+        <div class="chip-cell-label">U10 packets</div>
+        <div class="chip-cell-val u10" id="cntU10">0</div>
+      </div>
+      <div class="chip-cell">
+        <div class="chip-cell-label">U2 packets</div>
+        <div class="chip-cell-val u2" id="cntU2">0</div>
+      </div>
+      <div class="chip-cell">
+        <div class="chip-cell-label">Parse errors</div>
+        <div class="chip-cell-val" id="cntErr" style="color:#dc2626">0</div>
+      </div>
+      <div class="chip-cell">
+        <div class="chip-cell-label">Sample rate</div>
+        <div class="chip-cell-val" id="sps" style="color:#6b7280">—</div>
+      </div>
+    </div>
+    <span class="badge" id="statusBadge">Waiting...</span>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('waveform')">Waveforms</div>
+  <div class="tab" onclick="switchTab('heatmap')">All 24 Channels</div>
+  <div class="tab" onclick="switchTab('accel')">Acceleration</div>
+</div>
+
+<!-- Waveform Panel -->
+<div class="panel active" id="panel-waveform">
+  <div class="chart-card">
+    <div>
+      <h2>PPG Waveforms</h2>
+      <p>Last 20 s · 24 channels (4 PDs × 6 LEDs: 3 wavelengths × 2 LEDs each) · click chips to toggle</p>
+    </div>
+    <div class="ch-select" id="chSelect" style="margin-bottom:16px;"></div>
+    <div class="chart-wrap">
+      <canvas id="ppgChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- 24-channel heatmap panel -->
+<div class="panel" id="panel-heatmap">
+  <div class="heat-grid">
+    <div class="heat-chip">
+      <h3>U10 — Primary MAX86141</h3>
+      <p>12 slots · CSB1 (P0.17)</p>
+      <div class="heat-slots" id="heatU10"></div>
+    </div>
+    <div class="heat-chip">
+      <h3>U2 — Secondary MAX86141</h3>
+      <p>12 slots · CSB2 (P0.27) · MAX4783 mux ctrl</p>
+      <div class="heat-slots" id="heatU2"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Acceleration Panel -->
+<div class="panel" id="panel-accel">
+  <div class="chart-card" style="margin-bottom:16px;">
+    <h2>Acceleration — LSM6DSOTR</h2>
+    <p>±2g @ 26 Hz · last 20 s · slot_idx 200=X 201=Y 202=Z</p>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;">
+      <div class="chip-cell">
+        <div class="chip-cell-label">X axis</div>
+        <div class="chip-cell-val" id="axX" style="color:#3b82f6;">— m/s²</div>
+      </div>
+      <div class="chip-cell">
+        <div class="chip-cell-label">Y axis</div>
+        <div class="chip-cell-val" id="axY" style="color:#10b981;">— m/s²</div>
+      </div>
+      <div class="chip-cell">
+        <div class="chip-cell-label">Z axis</div>
+        <div class="chip-cell-val" id="axZ" style="color:#f59e0b;">— m/s²</div>
+      </div>
+    </div>
+    <div style="font-size:0.8rem;color:#9ca3af;margin-bottom:16px;">
+      Magnitude: <span id="axMag" style="font-weight:600;color:#374151;">—</span> m/s²
+      &nbsp;·&nbsp; Motion: <span id="axMotion" class="badge">Waiting...</span>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="accelChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<button class="help-btn">?</button>
+
+<!-- Connect Modal -->
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h3>Connect to Device</h3>
+    <p>Scan for PPG_DK_2026A over BLE</p>
+    <div class="ios-warn" id="iosWarn" style="display:none">
+      ⚠️ iOS Safari does not support Web Bluetooth. Use Chrome on Android, or the <strong>Bluefy</strong> browser on iOS.
+    </div>
+    <button class="modal-btn primary" id="modalBtn" onclick="connect()">Scan &amp; Connect</button>
+    <button class="modal-btn secondary" onclick="closeModal()">Cancel</button>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// BLE constants
+// ─────────────────────────────────────────────────────────────────────────────
+const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_TX      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const DEVICE_NAME = 'PPG_DK_2026A';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Packet format from firmware:
+//   al_transmit_data(raw32, slot_idx)
+//   →  snprintf("%u %u %u\r\n", tag, optical_19bit, slot_idx)
+//
+// tag      : bits[23:19] of the MAX86141 FIFO word (1-12)
+// optical  : bits[18:0]  — ADC count
+// slot_idx : 0-11 = U10, 128-139 = U2
+//
+// FIFO tag → channel (6-slot sequencer, LED1=GPIO2 LOW, LED2=GPIO2 HIGH):
+//   Slot1→tag1/7 : LED1/LED1 = Red·LED1    Slot2→tag2/8 : LED1/LED2 = Red·LED2
+//   Slot3→tag3/9 : LED2/LED1 = IR·LED1     Slot4→tag4/10: LED2/LED2 = IR·LED2
+//   Slot5→tag5/11: LED3/LED1 = Grn·LED1    Slot6→tag6/12: LED3/LED2 = Grn·LED2
+//   Tags 1-6 = PD1, tags 7-12 = PD2
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TAG_NAMES used by heatmap — prefix chip label at render time for PD3/PD4 vs PD1/PD2
+const TAG_NAMES_U10 = {
+  1:'Red·LED1 PD1', 2:'Red·LED2 PD1', 3:'IR·LED1 PD1',  4:'IR·LED2 PD1',  5:'Grn·LED1 PD1', 6:'Grn·LED2 PD1',
+  7:'Red·LED1 PD2', 8:'Red·LED2 PD2', 9:'IR·LED1 PD2', 10:'IR·LED2 PD2', 11:'Grn·LED1 PD2', 12:'Grn·LED2 PD2'
+};
+const TAG_NAMES_U2 = {
+  1:'Red·LED1 PD3', 2:'Red·LED2 PD3', 3:'IR·LED1 PD3',  4:'IR·LED2 PD3',  5:'Grn·LED1 PD3', 6:'Grn·LED2 PD3',
+  7:'Red·LED1 PD4', 8:'Red·LED2 PD4', 9:'IR·LED1 PD4', 10:'IR·LED2 PD4', 11:'Grn·LED1 PD4', 12:'Grn·LED2 PD4'
+};
+
+// Dataset definitions — 24 channels: 4 PDs × 6 LEDs (3 wavelengths × 2 banks)
+// Global PD numbering: PD1=U10·PPG1, PD2=U10·PPG2, PD3=U2·PPG1, PD4=U2·PPG2
+// Grouped by wavelength+bank (6 groups of 4), one line per PD
+// chip: 'u10'=slot_idx 0-11 (PD1/PD2), 'u2'=slot_idx 128-139 (PD3/PD4)
+// Within each chip: tags 1-6=PPG1(odd PD), tags 7-12=PPG2(even PD)
+const DATASETS = [
+  // IR/LED1 — shown by default (LED2, slot3/9, GPIO2=LOW)
+  { label:'IR·LED1 PD1', chip:'u10', tag:3,  color:'#93c5fd', dash:[]    },
+  { label:'IR·LED1 PD2', chip:'u10', tag:9,  color:'#2563eb', dash:[5,3] },
+  { label:'IR·LED1 PD3', chip:'u2',  tag:3,  color:'#fbbf24', dash:[]    },
+  { label:'IR·LED1 PD4', chip:'u2',  tag:9,  color:'#d97706', dash:[5,3] },
+  // IR/LED2 — hidden by default (LED2, slot4/10, GPIO2=HIGH)
+  { label:'IR·LED2 PD1', chip:'u10', tag:4,  color:'#818cf8', dash:[]    },
+  { label:'IR·LED2 PD2', chip:'u10', tag:10, color:'#4338ca', dash:[5,3] },
+  { label:'IR·LED2 PD3', chip:'u2',  tag:4,  color:'#c084fc', dash:[]    },
+  { label:'IR·LED2 PD4', chip:'u2',  tag:10, color:'#7c3aed', dash:[5,3] },
+  // Red/LED1 — hidden by default (LED1, slot1/7, GPIO2=LOW)
+  { label:'Red·LED1 PD1', chip:'u10', tag:1, color:'#fca5a5', dash:[]    },
+  { label:'Red·LED1 PD2', chip:'u10', tag:7, color:'#dc2626', dash:[5,3] },
+  { label:'Red·LED1 PD3', chip:'u2',  tag:1, color:'#f87171', dash:[]    },
+  { label:'Red·LED1 PD4', chip:'u2',  tag:7, color:'#991b1b', dash:[5,3] },
+  // Red/LED2 — hidden by default (LED1, slot2/8, GPIO2=HIGH)
+  { label:'Red·LED2 PD1', chip:'u10', tag:2,  color:'#fb923c', dash:[]    },
+  { label:'Red·LED2 PD2', chip:'u10', tag:8,  color:'#c2410c', dash:[5,3] },
+  { label:'Red·LED2 PD3', chip:'u2',  tag:2,  color:'#fdba74', dash:[]    },
+  { label:'Red·LED2 PD4', chip:'u2',  tag:8,  color:'#ea580c', dash:[5,3] },
+  // Grn/LED1 — hidden by default (LED3, slot5/11, GPIO2=LOW)
+  { label:'Grn·LED1 PD1', chip:'u10', tag:5,  color:'#6ee7b7', dash:[]    },
+  { label:'Grn·LED1 PD2', chip:'u10', tag:11, color:'#059669', dash:[5,3] },
+  { label:'Grn·LED1 PD3', chip:'u2',  tag:5,  color:'#a7f3d0', dash:[]    },
+  { label:'Grn·LED1 PD4', chip:'u2',  tag:11, color:'#047857', dash:[5,3] },
+  // Grn/LED2 — hidden by default (LED3, slot6/12, GPIO2=HIGH)
+  { label:'Grn·LED2 PD1', chip:'u10', tag:6,  color:'#d9f99d', dash:[]    },
+  { label:'Grn·LED2 PD2', chip:'u10', tag:12, color:'#65a30d', dash:[5,3] },
+  { label:'Grn·LED2 PD3', chip:'u2',  tag:6,  color:'#bbf7d0', dash:[]    },
+  { label:'Grn·LED2 PD4', chip:'u2',  tag:12, color:'#16a34a', dash:[5,3] },
+];
+
+const MAX_PTS = 500;  // ~20s of history at 25sps
+
+// Per-dataset ring buffers
+const bufs = DATASETS.map(() => []);
+let bufTime = [];
+
+// Latest value per (chip, tag) key for heatmap + cards
+const latestVal = {};   // key = chip+':'+tag  →  number
+
+// Counters
+let cntU10 = 0, cntU2 = 0, cntErr = 0;
+let totalSamples = 0, spsTimer = 0, spsLast = 0;
+
+// SpO2 / HR rolling data (use U2 IR·LED1·PD2 tag=9, Red·LED1·PD2 tag=7)
+let rollingIR = [], rollingRed = [];
+let irPeaks = [], lastPeakTime = 0, prevIR = 0, prevDelta = 0;
+
+// Active chart datasets (toggle state) — IR group on by default (indices 0-3)
+let dsVisible = DATASETS.map((_,i) => i < 4);
+
+// Accel buffers (slot_idx 200/201/202)
+let bufAX = [], bufAY = [], bufAZ = [];
+const ACCEL_OFFSET = 20000; // added by firmware so value is always unsigned
+const ACCEL_SCALE  = 100;   // firmware sends cm/s², we display m/s²
+
+let partialLine = '';
+let device, isConnected = false;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Accel chart setup
+// ─────────────────────────────────────────────────────────────────────────────
+const actx = document.getElementById('accelChart').getContext('2d');
+const accelChart = new Chart(actx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      { label:'X', data:[], borderColor:'#3b82f6', borderWidth:1.5, pointRadius:0, tension:0.3 },
+      { label:'Y', data:[], borderColor:'#10b981', borderWidth:1.5, pointRadius:0, tension:0.3 },
+      { label:'Z', data:[], borderColor:'#f59e0b', borderWidth:1.5, pointRadius:0, tension:0.3 },
+    ]
+  },
+  options: {
+    animation: false, responsive: true, maintainAspectRatio: false,
+    interaction: { mode:'index', intersect:false },
+    plugins: { legend: { position:'bottom', labels:{ color:'#6b7280', boxWidth:10, font:{size:11}, usePointStyle:true } } },
+    scales: {
+      x: { ticks:{ color:'#9ca3af', font:{size:10}, maxTicksLimit:8 }, grid:{ color:'#f3f4f6' } },
+      y: { title:{ display:true, text:'m/s²', color:'#9ca3af', font:{size:10} },
+           ticks:{ color:'#9ca3af', font:{size:10} }, grid:{ color:'#f3f4f6', borderDash:[4,4] } }
+    }
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PPG Chart setup
+// ─────────────────────────────────────────────────────────────────────────────
+const ctx = document.getElementById('ppgChart').getContext('2d');
+const chart = new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: DATASETS.map((ds, i) => ({
+      label:            ds.label,
+      data:             [],
+      borderColor:      ds.color,
+      borderWidth:      ds.dash.length ? 1.5 : 2,
+      borderDash:       ds.dash,
+      pointRadius:      0,
+      tension:          0.3,
+      hidden:           !dsVisible[i],
+    }))
+  },
+  options: {
+    animation: false,
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: {
+        display: false  // we have custom toggle chips
+      }
+    },
+    scales: {
+      x: {
+        ticks:{ color:'#9ca3af', font:{size:10}, maxTicksLimit:8,
+                callback: (_, i) => bufTime[i] || '' },
+        grid:{ color:'#f3f4f6' }
+      },
+      y: {
+        ticks:{ color:'#9ca3af', font:{size:10} },
+        grid:{ color:'#f3f4f6', borderDash:[4,4] }
+      }
+    }
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Channel toggle chips UI — 3 labelled groups of 4
+// ─────────────────────────────────────────────────────────────────────────────
+const chSelectEl = document.getElementById('chSelect');
+const GROUP_LABELS = ['IR/LED1', 'IR/LED2', 'Red/LED1', 'Red/LED2', 'Grn/LED1', 'Grn/LED2'];
+DATASETS.forEach((ds, i) => {
+  // Insert group header before each group of 4
+  if (i % 4 === 0) {
+    const lbl = document.createElement('span');
+    lbl.className = 'ch-group-label';
+    lbl.textContent = GROUP_LABELS[i / 4];
+    chSelectEl.appendChild(lbl);
+  }
+  const chip = document.createElement('span');
+  chip.className = 'ch-chip' + (dsVisible[i] ? ' active' : '');
+  chip.textContent = ds.label.trim();
+  chip.style.color = ds.color;
+  chip.style.background = hexAlpha(ds.color, 0.1);
+  chip.onclick = () => {
+    dsVisible[i] = !dsVisible[i];
+    chip.classList.toggle('active', dsVisible[i]);
+    chart.data.datasets[i].hidden = !dsVisible[i];
+    chart.update('none');
+  };
+  chSelectEl.appendChild(chip);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Heatmap init (12 slots × 2 chips)
+// ─────────────────────────────────────────────────────────────────────────────
+const SLOT_ORDER = [1,7,2,8,3,9,4,10,5,11,6,12]; // interleaved PD1/PD2
+
+['heatU10','heatU2'].forEach(id => {
+  const el = document.getElementById(id);
+  const tagNames = (id === 'heatU10') ? TAG_NAMES_U10 : TAG_NAMES_U2;
+  SLOT_ORDER.forEach(tag => {
+    const cell = document.createElement('div');
+    cell.className = 'heat-slot';
+    cell.id = id + '-t' + tag;
+    cell.innerHTML = `<div class="heat-slot-label">${tagNames[tag]}</div>
+                      <div class="heat-slot-val">—</div>`;
+    el.appendChild(cell);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tab switching
+// ─────────────────────────────────────────────────────────────────────────────
+function switchTab(name) {
+  const tabNames = ['waveform','heatmap','accel'];
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', tabNames[i] === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  if (name === 'waveform') chart.resize();
+  if (name === 'accel')    accelChart.resize();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modal
+// ─────────────────────────────────────────────────────────────────────────────
+function showConnect() {
+  if (/iP(hone|od|ad)/.test(navigator.userAgent))
+    document.getElementById('iosWarn').style.display = 'block';
+  document.getElementById('overlay').classList.add('show');
+}
+function closeModal() { document.getElementById('overlay').classList.remove('show'); }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BLE
+// ─────────────────────────────────────────────────────────────────────────────
+async function connect() {
+  if (!navigator.bluetooth) {
+    alert('Web Bluetooth not available. Use Chrome on Android/desktop.');
+    return;
+  }
+  const btn = document.getElementById('modalBtn');
+  btn.textContent = 'Scanning…'; btn.disabled = true;
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: DEVICE_NAME }],
+      optionalServices: [NUS_SERVICE]
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnect);
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(NUS_SERVICE);
+    const txChar  = await service.getCharacteristic(NUS_TX);
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', onData);
+    setConnected(true);
+    closeModal();
+  } catch(e) {
+    btn.textContent = 'Scan & Connect'; btn.disabled = false;
+    if (e.name !== 'NotFoundError') alert('Connection failed: ' + e.message);
+  }
+}
+
+function setConnected(v) {
+  isConnected = v;
+  const liveBtn = document.getElementById('liveBtn');
+  liveBtn.classList.toggle('connected', v);
+  liveBtn.innerHTML = `<div class="live-dot"></div>${v ? 'Connected' : 'Live'}`;
+  liveBtn.onclick = v ? disconnect : showConnect;
+  if (v) {
+    // reset counters
+    cntU10 = cntU2 = cntErr = totalSamples = 0;
+    spsLast = Date.now(); spsTimer = 0;
+    rollingIR = []; rollingRed = [];
+    irPeaks = []; lastPeakTime = 0; prevIR = 0; prevDelta = 0;
+    bufs.forEach(b => b.length = 0);
+    bufTime.length = 0;
+    bufAX.length = 0; bufAY.length = 0; bufAZ.length = 0;
+  }
+}
+function disconnect() {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+}
+function onDisconnect() {
+  setConnected(false);
+  const lb = document.getElementById('liveBtn');
+  lb.innerHTML = '<div class="live-dot"></div>Live';
+  lb.onclick = showConnect;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Data parsing
+// ─────────────────────────────────────────────────────────────────────────────
+function onData(event) {
+  const raw = new TextDecoder().decode(event.target.value);
+  partialLine += raw;
+  const lines = partialLine.split('\n');
+  partialLine = lines.pop();
+  for (const line of lines) processMaybeLine(line.trim());
+  updateChart();
+  updateCards();
+}
+
+function processMaybeLine(line) {
+  if (!line) return;
+  // Expected: "TAG OPTICAL SLOT_IDX"
+  const parts = line.split(/\s+/);
+  if (parts.length < 2) { cntErr++; return; }
+  const tag      = parseInt(parts[0]);
+  const val      = parseInt(parts[1]);
+  const slotIdx  = parts.length >= 3 ? parseInt(parts[2]) : NaN;
+  if (isNaN(tag) || isNaN(val) || tag < 1 || tag > 12) { cntErr++; return; }
+
+  // ── Accelerometer packets (slot_idx 200/201/202, tag=0) ──────────────────
+  if (!isNaN(slotIdx) && slotIdx >= 200 && slotIdx <= 202) {
+    const accel_m_s2 = (val - ACCEL_OFFSET) / ACCEL_SCALE;
+    if (slotIdx === 200) {
+      bufAX.push(accel_m_s2); if (bufAX.length > MAX_PTS) bufAX.shift();
+      setText('axX', accel_m_s2.toFixed(2) + ' m/s²');
+    } else if (slotIdx === 201) {
+      bufAY.push(accel_m_s2); if (bufAY.length > MAX_PTS) bufAY.shift();
+      setText('axY', accel_m_s2.toFixed(2) + ' m/s²');
+    } else {
+      bufAZ.push(accel_m_s2); if (bufAZ.length > MAX_PTS) bufAZ.shift();
+      setText('axZ', accel_m_s2.toFixed(2) + ' m/s²');
+    }
+    // Update magnitude and motion badge when we have all three
+    if (bufAX.length && bufAY.length && bufAZ.length) {
+      const x = bufAX[bufAX.length-1], y = bufAY[bufAY.length-1], z = bufAZ[bufAZ.length-1];
+      const mag = Math.sqrt(x*x + y*y + z*z);
+      setText('axMag', mag.toFixed(2));
+      // Deviation from 1g (9.81) indicates motion
+      const motion = Math.abs(mag - 9.81) > 0.5;
+      updateBadge('axMotion', motion ? 'Motion detected' : 'Still', motion ? 'warn' : 'ok');
+    }
+    updateAccelChart();
+    return;
+  }
+
+  const chip = (!isNaN(slotIdx) && slotIdx >= 128) ? 'u2' : 'u10';
+  const key  = chip + ':' + tag;
+  latestVal[key] = val;
+
+  if (chip === 'u10') cntU10++; else cntU2++;
+  totalSamples++;
+
+  // Timestamp (attached to IR·LED1·PD2, most stable)
+  if (tag === 9 && chip === 'u10') {
+    const now = new Date();
+    const ts = now.toLocaleTimeString('en-US', {hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'})
+               + '.' + String(now.getMilliseconds()).padStart(3,'0').slice(0,1);
+    bufTime.push(ts);
+    if (bufTime.length > MAX_PTS) bufTime.shift();
+  }
+
+  // Fill dataset buffers
+  DATASETS.forEach((ds, i) => {
+    if (ds.chip === chip && ds.tag === tag) {
+      bufs[i].push(val);
+      if (bufs[i].length > MAX_PTS) bufs[i].shift();
+    }
+  });
+
+  // SpO2 + HR from U2 IR·LED1·PD2 (tag=9) and Red·LED1·PD2 (tag=7)
+  if (chip === 'u2' && tag === 9) {
+    rollingIR.push(val);
+    if (rollingIR.length > 50) rollingIR.shift();
+    detectPeak(val, Date.now());
+    updateSpO2();
+  }
+  if (chip === 'u2' && tag === 7) {
+    rollingRed.push(val);
+    if (rollingRed.length > 50) rollingRed.shift();
+  }
+
+  // Heatmap
+  updateHeatCell(chip === 'u10' ? 'heatU10' : 'heatU2', tag, val);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Accel chart
+// ─────────────────────────────────────────────────────────────────────────────
+function updateAccelChart() {
+  const n = Math.max(bufAX.length, bufAY.length, bufAZ.length);
+  accelChart.data.labels = Array.from({length: n}, (_, i) => i);
+  accelChart.data.datasets[0].data = [...bufAX];
+  accelChart.data.datasets[1].data = [...bufAY];
+  accelChart.data.datasets[2].data = [...bufAZ];
+  accelChart.update('none');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PPG chart
+// ─────────────────────────────────────────────────────────────────────────────
+function updateChart() {
+  const n = bufTime.length;
+  chart.data.labels = Array.from({length: n}, (_, i) => i);
+  DATASETS.forEach((_, i) => {
+    chart.data.datasets[i].data = [...bufs[i]];
+  });
+  chart.update('none');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Card updates
+// ─────────────────────────────────────────────────────────────────────────────
+function updateCards() {
+  // IR values
+  setText('irU10P1', fmtVal(latestVal['u10:2']));
+  setText('irU10P2', fmtVal(latestVal['u10:8']));
+  setText('irU2P1',  fmtVal(latestVal['u2:2']));
+  setText('irU2P2',  fmtVal(latestVal['u2:8']));
+
+  // Chip counts
+  setText('cntU10', cntU10.toLocaleString());
+  setText('cntU2',  cntU2.toLocaleString());
+  setText('cntErr', cntErr.toLocaleString());
+
+  // Sample rate (update every second)
+  const now = Date.now();
+  if (now - spsLast >= 1000) {
+    const rate = Math.round((totalSamples - spsTimer) / ((now - spsLast) / 1000));
+    spsTimer = totalSamples;
+    spsLast  = now;
+    setText('sps', rate + '/s');
+  }
+
+  // Chip status badge
+  const bothActive = cntU10 > 0 && cntU2 > 0;
+  const onlyU10    = cntU10 > 0 && cntU2 === 0;
+  updateBadge('statusBadge',
+    bothActive ? 'Both chips OK' : onlyU10 ? 'U2 silent!' : cntU2 > 0 ? 'U10 silent!' : 'No data',
+    bothActive ? 'ok' : 'err');
+
+  updateBadge('ppgBadge', (cntU10 + cntU2) > 0 ? 'Streaming' : 'Waiting…', (cntU10 + cntU2) > 0 ? 'ok' : '');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Heatmap
+// ─────────────────────────────────────────────────────────────────────────────
+const HEAT_MAX = 300000;
+function updateHeatCell(gridId, tag, val) {
+  const cell = document.getElementById(gridId + '-t' + tag);
+  if (!cell) return;
+  const valEl = cell.querySelector('.heat-slot-val');
+  valEl.textContent = val > 999 ? (val/1000).toFixed(1)+'k' : val;
+  // Color intensity
+  const pct = Math.min(val / HEAT_MAX, 1);
+  const isIR    = tag === 2 || tag === 8;
+  const isRed   = tag === 1 || tag === 7;
+  const isGreen = tag === 3 || tag === 9;
+  let r=243,g=244,b=246; // default grey
+  if (val > 0) {
+    if (isIR)    { r=219-(219-59)*pct;  g=234-(234-130)*pct; b=254-(254-246)*pct; }  // blue
+    else if (isRed)   { r=239,           g=Math.round(68*(1-pct)+243*pct);   b=Math.round(68*(1-pct)+244*pct); }  // red
+    else if (isGreen) { r=Math.round(16+(243-16)*pct); g=Math.round(185+(244-185)*pct); b=Math.round(129+(246-129)*pct); } // green
+  }
+  cell.style.background = `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Heart rate
+// ─────────────────────────────────────────────────────────────────────────────
+function detectPeak(val, t) {
+  const delta = val - prevIR;
+  if (prevDelta > 0 && delta <= 0 && prevIR > avg(rollingIR) * 1.02) {
+    const gap = t - lastPeakTime;
+    if (gap > 300 && gap < 2000) {
+      irPeaks.push(gap);
+      if (irPeaks.length > 8) irPeaks.shift();
+      const avgGap = irPeaks.reduce((a,b)=>a+b,0) / irPeaks.length;
+      const bpm = Math.round(60000 / avgGap);
+      document.getElementById('hrValue').innerHTML = bpm + '<span>BPM</span>';
+      const ok = bpm >= 50 && bpm <= 110;
+      updateBadge('hrBadge', ok ? 'Normal Range' : 'Out of Range', ok ? 'ok' : 'warn');
+    }
+    lastPeakTime = t;
+  }
+  prevDelta = delta;
+  prevIR    = val;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SpO2 (ratio-of-ratios, U2 PD2)
+// ─────────────────────────────────────────────────────────────────────────────
+function updateSpO2() {
+  if (rollingRed.length < 20 || rollingIR.length < 20) return;
+  const acRed = stddev(rollingRed), dcRed = avg(rollingRed);
+  const acIR  = stddev(rollingIR),  dcIR  = avg(rollingIR);
+  if (dcRed === 0 || dcIR === 0) return;
+  const R    = (acRed / dcRed) / (acIR / dcIR);
+  const spo2 = Math.min(100, Math.max(85, Math.round(110 - 25 * R)));
+  document.getElementById('spo2Value').innerHTML = spo2 + '<span>%</span>';
+  const ok = spo2 >= 95;
+  updateBadge('spo2Badge', ok ? 'Normal Range' : 'Low — check sensor', ok ? 'ok' : 'warn');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Utils
+// ─────────────────────────────────────────────────────────────────────────────
+function avg(arr)    { return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 0; }
+function stddev(arr) { const m=avg(arr); return Math.sqrt(arr.reduce((s,v)=>s+(v-m)**2,0)/arr.length); }
+function setText(id, v)   { const e=document.getElementById(id); if(e) e.textContent=v; }
+function fmtVal(v)   { return v==null ? '—' : v>999 ? Math.round(v/1000)+'k' : v; }
+function updateBadge(id, text, type) {
+  const b = document.getElementById(id);
+  if (!b) return;
+  b.textContent = text;
+  b.className   = 'badge' + (type==='warn' ? ' warn' : type==='err' ? ' err' : '');
+}
+function hexAlpha(hex, a) {
+  const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+// iOS detection
+if (/iP(hone|od|ad)/.test(navigator.userAgent))
+  document.getElementById('iosWarn').style.display = 'block';
+</script>
+</body>
+</html>
