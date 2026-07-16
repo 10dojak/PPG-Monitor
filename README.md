@@ -75,7 +75,7 @@ Each line: `tag value slotIndex\r\n`
 
 **IMU encoding:** `encoded = accel_cm/s² + 20000` (offset to keep unsigned)
 
-### Key Configuration (Rutendo Jakachira, July 2026)
+### Key Configuration (July 2026)
 
 | Parameter | U10 | U2 |
 |---|---|---|
