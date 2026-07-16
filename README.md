@@ -1,6 +1,6 @@
 # PPG Monitor
 
-**Developed by Rutendo Jakachira (rutendo_jakachira@brown.edu) · July 2026**
+**Last updated July 2026**
 
 A full-stack photoplethysmography (PPG) system for the Proto2403 custom board, including embedded firmware, a web-based monitor, and a native iOS app. Streams live optical and IMU data over Bluetooth Low Energy (BLE).
 
