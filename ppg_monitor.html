@@ -36,6 +36,18 @@ body {
   border-radius: 10px; padding: 8px 18px;
   font-size: 0.85rem; font-weight: 600; cursor: pointer;
 }
+.btn-utility {
+  display: flex; align-items: center; gap: 8px;
+  background: white; color: #374151; border: 1.5px solid #d1d5db;
+  border-radius: 10px; padding: 8px 14px;
+  font-size: 0.82rem; font-weight: 600; cursor: pointer;
+}
+.btn-utility.primary {
+  background: #dc2626; color: white; border-color: #dc2626;
+}
+.btn-utility:disabled {
+  opacity: 0.45; cursor: not-allowed;
+}
 .btn-live .live-dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: white; opacity: 0.5; transition: opacity 0.3s;
@@ -107,6 +119,30 @@ body {
 }
 .panel { display: none; }
 .panel.active { display: block; }
+
+.recorder-bar {
+  background: white; border-radius: 16px;
+  padding: 16px 18px; margin-bottom: 20px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+}
+.recorder-copy h3 {
+  font-size: 1rem; font-weight: 700; color: #111827; margin-bottom: 4px;
+}
+.recorder-copy p {
+  font-size: 0.82rem; color: #6b7280;
+}
+.recorder-actions {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end;
+}
+@media(max-width:900px) {
+  .recorder-bar {
+    flex-direction: column; align-items: flex-start;
+  }
+  .recorder-actions {
+    justify-content: flex-start;
+  }
+}
 
 /* Chart card */
 .chart-card {
@@ -223,6 +259,19 @@ body {
       <div class="live-dot"></div>
       Live
     </button>
+  </div>
+</div>
+
+<div class="recorder-bar">
+  <div class="recorder-copy">
+    <h3>Session Recorder</h3>
+    <p id="recorderSummary">Not recording · no saved sessions yet</p>
+  </div>
+  <div class="recorder-actions">
+    <button class="btn-utility primary" id="recordBtn" onclick="startRecording()">Start Recording</button>
+    <button class="btn-utility" id="stopRecordBtn" onclick="stopRecording()" disabled>Stop &amp; Save</button>
+    <button class="btn-utility" id="downloadCsvBtn" onclick="downloadLatestSessionCsv()" disabled>Download CSV</button>
+    <button class="btn-utility" id="downloadJsonBtn" onclick="downloadLatestSessionJson()" disabled>Download JSON</button>
   </div>
 </div>
 
@@ -356,7 +405,7 @@ body {
 <div class="panel" id="panel-accel">
   <div class="chart-card" style="margin-bottom:16px;">
     <h2>Acceleration — LSM6DSOTR</h2>
-    <p>±2g @ 26 Hz · last 20 s · slot_idx 200=X 201=Y 202=Z</p>
+    <p>±2g @ 26 Hz accel on 200..202 · gyro on 210..212 · wake-up event on 220</p>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;">
       <div class="chip-cell">
         <div class="chip-cell-label">X axis</div>
@@ -403,6 +452,9 @@ body {
 const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const NUS_TX      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 const DEVICE_NAME = 'PPG_DK_2026A';
+const RECORDER_DB_NAME = 'ppg-monitor-recorder';// IndexedDB database name
+const RECORDER_DB_VERSION = 1;// IndexedDB version
+const RECORDER_STORE = 'sessions';// IndexedDB object store name
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Packet format from firmware:
@@ -492,9 +544,232 @@ let dsVisible = DATASETS.map((_,i) => i < 4);
 let bufAX = [], bufAY = [], bufAZ = [];
 const ACCEL_OFFSET = 20000; // added by firmware so value is always unsigned
 const ACCEL_SCALE  = 100;   // firmware sends cm/s², we display m/s²
+const GYRO_OFFSET  = 50000; // firmware offsets mrad/s gyro samples to keep them unsigned
 
-let partialLine = '';
-let device, isConnected = false;
+let partialLine = '';// buffer for partial line from BLE stream
+let device, isConnected = false;// check whether device is connected
+let recorderDbPromise = null;// IndexedDB promise for recorder; indexedDB is async and eventbased so we keep a promise to avoid multiple opens
+let savedSessionCount = 0;// number of saved sessions in IndexedDB
+let currentRecording = null;// current recording session object (or null if not recording)
+let latestSavedSession = null;// latest saved session object (or null if none). stores the most recent session saved to IndexedDB, used for download buttons and UI summary
+let recorderStatusTick = 0;// counter to throttle UI updates during recording; used to avoid updating the UI on every packet received, which can be expensive and cause jank
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recorder
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Open IndexedDB for recorder sessions
+// updated by Kelvin Amankwaa on 08/03/2026
+function openRecorderDb() {
+  if (recorderDbPromise) return recorderDbPromise;// already opened; use the existing promise
+  recorderDbPromise = new Promise((resolve, reject) => {// open the IndexedDB database; indexedDB is async and event-based, so we use a promise to handle the result
+    const req = indexedDB.open(RECORDER_DB_NAME, RECORDER_DB_VERSION);// open the database with the specified name and version
+    req.onupgradeneeded = () => {// called if the database needs to be created or version is upgraded; we create the object store and index here
+      const db = req.result;// get the database instance
+      if (!db.objectStoreNames.contains(RECORDER_STORE)) {// check if the object store already exists; if not, create it
+        const store = db.createObjectStore(RECORDER_STORE, { keyPath: 'id' });// create the object store with 'id' as the key path; this creates a store for session objects, where each session has a unique 'id'
+        store.createIndex('startedAt', 'startedAt');// create an index on the 'startedAt' property; this allows us to query sessions by their start time, which is useful for retrieving the latest session
+      }
+    };
+    req.onsuccess = () => resolve(req.result);// resolve the promise with the database instance when the open operation succeeds
+    req.onerror = () => reject(req.error);// reject the promise with the error if the open operation fails
+  });
+  return recorderDbPromise;// return the promise for the database instance; this allows other functions to wait for the database to be ready before performing operations
+}
+
+// Load the count of saved sessions and the latest saved session from IndexedDB
+async function loadSavedSessionCount() {
+  const db = await openRecorderDb();// wait for the database to be opened; this ensures that we have access to the object store before querying it
+  savedSessionCount = await new Promise((resolve, reject) => {
+    const tx = db.transaction(RECORDER_STORE, 'readonly');// create a read-only transaction on the object store; this allows us to query the store without modifying it
+    const store = tx.objectStore(RECORDER_STORE);// get the object store for sessions; this is where we will count the number of saved sessions
+    const req = store.count();// request the count of objects in the store; this returns the total number of saved sessions
+    req.onsuccess = () => resolve(req.result || 0);// resolve the promise with the count result; if there are no sessions, return 0
+    req.onerror = () => reject(req.error);
+  });
+  latestSavedSession = await new Promise((resolve, reject) => {// get the latest saved session by querying the index on 'startedAt' in descending order; this allows us to retrieve the most recent session
+    const tx = db.transaction(RECORDER_STORE, 'readonly');// create a read-only transaction on the object store; this allows us to query the store without modifying it
+    const index = tx.objectStore(RECORDER_STORE).index('startedAt');// get the index on 'startedAt'; this allows us to query sessions by their start time
+    const req = index.openCursor(null, 'prev');// open a cursor on the index in descending order; this allows us to iterate over sessions starting from the most recent
+    req.onsuccess = () => resolve(req.result ? req.result.value : null);// resolve the promise with the latest session if it exists; if there are no sessions, return null
+    req.onerror = () => reject(req.error);// reject the promise with the error if the cursor operation fails
+  });
+  updateRecorderUi();// update the UI to reflect the loaded session count and latest session; this ensures that the user sees the correct information when the page loads
+}
+
+// Save a recording session to IndexedDB
+async function saveSessionToDb(session) {
+  const db = await openRecorderDb();// wait for the database to be opened; this ensures that we have access to the object store before saving the session
+  await new Promise((resolve, reject) => {// create a read-write transaction on the object store; this allows us to save the session to the store
+    const tx = db.transaction(RECORDER_STORE, 'readwrite');// create a read-write transaction on the object store; this allows us to save the session to the store
+    tx.oncomplete = () => resolve();// resolve the promise when the transaction completes successfully; this indicates that the session has been saved
+    tx.onerror = () => reject(tx.error || new Error('Recorder transaction failed'));// reject the promise with the error if the transaction fails; this indicates that the session could not be saved
+    tx.objectStore(RECORDER_STORE).put(session);// put the session object into the object store; this saves the session to IndexedDB, using the 'id' property as the key
+  });
+}
+
+// Generate a unique session ID based on the current date and time
+function makeSessionId(date) {
+  const stamp = date.toISOString().replace(/[:.]/g, '-');// replace colons and periods with hyphens to create a valid ID; this ensures that the ID is unique and can be used as a key in IndexedDB
+  return `ppg-session-${stamp}`;
+}
+
+// Classify a packet based on its tag and slot index
+function classifyPacket(tag, slotIdx) {
+  if (slotIdx >= 200 && slotIdx <= 202) return 'imu_accel';// firmware sends accel on 200..202, gyro on 210..212, wakeup on 220
+  if (slotIdx >= 210 && slotIdx <= 212) return 'imu_gyro';// firmware sends gyro on 210..212
+  if (slotIdx === 220) return 'imu_wakeup';// firmware sends wakeup event on 220
+  if (slotIdx >= 128) return 'u2';// U2 slots are 128-139; the imu checks must come first because U2 slots are also >= 128
+  return 'u10';// U10 slots are 0-11
+}
+
+// Update the recorder UI based on the current recording state and saved sessions
+function updateRecorderUi() {
+  const isRecording = currentRecording !== null; // check if a recording session is currently active
+  const recordBtn = document.getElementById('recordBtn'); // get the "Start Recording" button element
+  const stopBtn = document.getElementById('stopRecordBtn'); // get the "Stop & Save" button element
+  const csvBtn = document.getElementById('downloadCsvBtn'); // get the "Download CSV" button element
+  const jsonBtn = document.getElementById('downloadJsonBtn'); // get the "Download JSON" button element
+  const summary = document.getElementById('recorderSummary'); // get the summary text element that displays the recording status and saved session information
+
+  recordBtn.disabled = isRecording; // disable the "Start Recording" button if a recording session is active
+  stopBtn.disabled = !isRecording; // disable the "Stop & Save" button if no recording session is active
+  csvBtn.disabled = !latestSavedSession; // disable the "Download CSV" button if there is no latest saved session
+  jsonBtn.disabled = !latestSavedSession; // disable the "Download JSON" button if there is no latest saved session
+
+  // Update the summary text based on the current recording state and saved sessions
+  if (isRecording) {// if a recording session is active, display the number of packets recorded and the start time
+    summary.textContent =
+      `Recording ${currentRecording.packetCount.toLocaleString()} packets · started ${new Date(currentRecording.startedAt).toLocaleTimeString()} · ${savedSessionCount} saved session${savedSessionCount === 1 ? '' : 's'}`;
+    return;
+  }
+
+  if (latestSavedSession) {// if there is a latest saved session, display the number of packets in that session and the total number of saved sessions
+    summary.textContent =
+      `Last saved ${latestSavedSession.packetCount.toLocaleString()} packets · ${savedSessionCount} saved session${savedSessionCount === 1 ? '' : 's'} in this browser`;
+    return;
+  }
+
+  summary.textContent =
+    savedSessionCount > 0
+      ? `${savedSessionCount} saved session${savedSessionCount === 1 ? '' : 's'} in this browser · start recording to capture a new run`
+      : 'Not recording · no saved sessions yet';// if there are no saved sessions and no recording is active, display a message indicating that there are no saved sessions yet
+}
+
+// Start a new recording session by creating a session object and initializing its properties 
+function startRecording() {
+  if (currentRecording) return;// if a recording session is already active, do nothing to prevent starting a new session while one is in progress
+  const startedAt = Date.now();// get the current timestamp in milliseconds to mark the start time of the recording session
+  
+  // Create a new session object with a unique ID, name, start time, and initialize other properties
+  currentRecording = {
+    id: makeSessionId(new Date(startedAt)),
+    name: `PPG Session ${new Date(startedAt).toLocaleString()}`,
+    startedAt,// readable timestamp for when the recording session started; this is used for display purposes in the UI
+    endedAt: null,// will be set when the recording session is stopped; this marks the end time of the session
+    packetCount: 0,// initialize the packet count to 0; this will be incremented as packets are recorded during the session
+    packets: []// initialize an empty array to hold the recorded packets; each packet will be pushed into this array as it is received during the recording session
+  };
+  recorderStatusTick = 0;// reset the status tick counter to 0; this is used to throttle UI updates during recording to avoid excessive updates that can cause jank
+  updateRecorderUi(); // update the UI to reflect that a new recording session has started; this will enable/disable buttons and update the summary text accordingly
+}
+
+// Stop the current recording session, save it to IndexedDB, and update the UI accordingly
+async function stopRecording() {
+  if (!currentRecording) return; // if there is no active recording session, do nothing to prevent errors when trying to stop a non-existent session
+  const finished = {
+    ...currentRecording,
+    endedAt: Date.now()
+  };
+  currentRecording = null;// clear the current recording session to indicate that recording has stopped
+
+  // Save the finished session to IndexedDB and update the UI with the new saved session count and latest session information
+  // Use a try-catch block to handle any errors that may occur during the save operation since IndexedDB operations can fail for various reasons (e.g., storage quota exceeded, browser restrictions)
+  try {
+    await saveSessionToDb(finished);
+    savedSessionCount += 1;
+    latestSavedSession = finished;
+    updateRecorderUi();
+  } catch (err) {
+    console.error('Failed to save session', err);
+    alert('Failed to save the recorded session in this browser.');
+  }
+}
+
+// Record a packet into the current recording session, if one is active, and update the UI occasionally to reflect the new packet count
+// this function is called whenever a new packet is received from the BLE device, and it adds the packet to the current recording session's packets array and increments the packet count
+function recordPacket(packet) {
+  if (!currentRecording) return;
+  currentRecording.packets.push(packet);// add the new packet to the packets array of the current recording session
+  currentRecording.packetCount += 1; // increment the packet count of the current recording session to reflect the new packet that has been recorded
+
+  // Refresh the status occasionally so the UI stays cheap even during streaming.
+  recorderStatusTick += 1;
+  if (recorderStatusTick >= 25) {
+    recorderStatusTick = 0;
+    updateRecorderUi();
+  }
+}
+
+// Get the latest session (either the most recently saved session or the current recording) or show a warning if none is available
+function latestSessionOrWarn() {
+  if (latestSavedSession) return latestSavedSession;
+  if (currentRecording && currentRecording.packetCount > 0) return currentRecording;
+  alert('No recorded session is available yet. Start recording first.');
+  return null;
+}
+
+// Download a Blob object as a file with the specified filename by creating a temporary anchor element and triggering a click event on it
+// a blob is a binary large object that can represent data such as text, images, or other file types, and this function allows the user to download it as a file from the browser
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);// create a temporary URL for the blob object that can be used as a link to download the file
+  const a = document.createElement('a'); // create a temporary anchor element that will be used to trigger the download
+  a.href = url; // set the href attribute of the anchor element to the temporary URL of the blob
+  a.download = filename; // set the download attribute of the anchor element to specify the filename for the downloaded file
+  document.body.appendChild(a); // append the anchor element to the document body so that it is part of the DOM and can be clicked programmatically
+  a.click(); // programmatically trigger a click event on the anchor element to start the download of the blob as a file
+  a.remove(); // remove the anchor element from the DOM after the download has been triggered to clean up and avoid leaving unnecessary elements in the document
+  URL.revokeObjectURL(url); // revoke the temporary URL created for the blob to free up memory and resources, as it is no longer needed after the download has been initiated
+}
+
+// Convert a session object to CSV format by creating a header row and mapping each packet to a CSV row with the appropriate fields
+function sessionToCsv(session) {
+  const header = [// define the header row for the CSV file, which includes the column names for each field in the session packets
+    'timestamp_iso',
+    'timestamp_ms',
+    'stream',
+    'tag',
+    'value',
+    'slot_idx',
+    'raw_line'
+  ];
+  // Map each packet in the session to a CSV row by extracting the relevant fields and joining them with commas, while also escaping any double quotes in the raw line to ensure proper CSV formatting
+  const rows = session.packets.map(pkt => ([
+    new Date(pkt.timestampMs).toISOString(),// convert the timestamp in milliseconds to an ISO string format for the CSV file
+    pkt.timestampMs,// include the raw timestamp in milliseconds for reference in the CSV file
+    pkt.stream,// include the stream type (e.g., 'u10', 'u2', 'imu_accel') for the packet in the CSV file
+    pkt.tag,// include the tag value for the packet in the CSV file, which indicates the specific channel or sensor that generated the data
+    pkt.value,// include the value of the packet in the CSV file, which represents the measured data from the sensor
+    pkt.slotIdx,// include the slot index for the packet in the CSV file, which indicates the specific slot in the sensor's FIFO that generated the data
+    `"${pkt.line.replaceAll('"', '""')}"`
+  ].join(',')));
+  return [header.join(','), ...rows].join('\n');// join the header row and all the packet rows with newline characters to create the final CSV string that can be downloaded as a file
+}
+
+// Download the latest session as a CSV file by converting the session to CSV format and triggering a download of the resulting Blob object
+function downloadLatestSessionCsv() {
+  const session = latestSessionOrWarn();// get the latest session (either the most recently saved session or the current recording) or show a warning if none is available
+  if (!session) return;// if there is no latest session available, exit the function to prevent errors when trying to download a non-existent session
+  const csv = sessionToCsv(session);// convert the session object to CSV format by creating a header row and mapping each packet to a CSV row with the appropriate fields 
+  downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `${session.id}.csv`);// create a new Blob object with the CSV data and trigger a download of the resulting file with the session ID as the filename
+}
+
+function downloadLatestSessionJson() {
+  const session = latestSessionOrWarn();
+  if (!session) return;
+  const json = JSON.stringify(session, null, 2);
+  downloadBlob(new Blob([json], { type: 'application/json;charset=utf-8' }), `${session.id}.json`);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Accel chart setup
@@ -709,10 +984,14 @@ function processMaybeLine(line) {
   const tag      = parseInt(parts[0]);
   const val      = parseInt(parts[1]);
   const slotIdx  = parts.length >= 3 ? parseInt(parts[2]) : NaN;
-  if (isNaN(tag) || isNaN(val) || tag < 1 || tag > 12) { cntErr++; return; }
+  const timestampMs = Date.now();
 
-  // ── Accelerometer packets (slot_idx 200/201/202, tag=0) ──────────────────
+  // Handle IMU packets before PPG tag validation.
+  // Firmware sends acceleration as `0 value slotIdx`, so rejecting tag 0 up front
+  // makes the web app silently drop every accel sample as a parse error.
   if (!isNaN(slotIdx) && slotIdx >= 200 && slotIdx <= 202) {
+    if (isNaN(tag) || isNaN(val) || tag !== 0) { cntErr++; return; }
+    recordPacket({ timestampMs, stream: classifyPacket(tag, slotIdx), tag, value: val, slotIdx, line });
     const accel_m_s2 = (val - ACCEL_OFFSET) / ACCEL_SCALE;
     if (slotIdx === 200) {
       bufAX.push(accel_m_s2); if (bufAX.length > MAX_PTS) bufAX.shift();
@@ -736,6 +1015,30 @@ function processMaybeLine(line) {
     updateAccelChart();
     return;
   }
+
+  // Gyro packets use the same IMU tag=0 framing but live on slots 210..212.
+  // The current page does not visualize them yet, but we accept them here so
+  // adding gyro streaming in firmware does not inflate the parse-error counter.
+  if (!isNaN(slotIdx) && slotIdx >= 210 && slotIdx <= 212) {
+    if (isNaN(tag) || isNaN(val) || tag !== 0) { cntErr++; return; }
+    recordPacket({ timestampMs, stream: classifyPacket(tag, slotIdx), tag, value: val, slotIdx, line });
+    // Gyro visualization has not been added to the page yet.
+    // For now, treat these packets as valid and ignore them after parsing.
+    return;
+  }
+
+  // Wake-up packets are event notifications rather than continuous traces.
+  // value bitfield: bit0=X, bit1=Y, bit2=Z. Accept them so firmware wake-up
+  // support does not show up as parser errors before a dedicated UI is added.
+  if (!isNaN(slotIdx) && slotIdx === 220) {
+    if (isNaN(tag) || isNaN(val) || tag !== 0) { cntErr++; return; }
+    recordPacket({ timestampMs, stream: classifyPacket(tag, slotIdx), tag, value: val, slotIdx, line });
+    return;
+  }
+
+  // PPG packets use MAX86141 FIFO tags 1..12.
+  if (isNaN(tag) || isNaN(val) || tag < 1 || tag > 12) { cntErr++; return; }
+  recordPacket({ timestampMs, stream: classifyPacket(tag, slotIdx), tag, value: val, slotIdx, line });
 
   const chip = (!isNaN(slotIdx) && slotIdx >= 128) ? 'u2' : 'u10';
   const key  = chip + ':' + tag;
@@ -894,6 +1197,13 @@ function updateSpO2() {
   const ok = spo2 >= 95;
   updateBadge('spo2Badge', ok ? 'Normal Range' : 'Low — check sensor', ok ? 'ok' : 'warn');
 }
+
+loadSavedSessionCount().catch(err => {
+  console.error('Recorder DB init failed', err);
+  document.getElementById('recorderSummary').textContent =
+    'Recorder unavailable in this browser session';
+});
+updateRecorderUi();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Utils

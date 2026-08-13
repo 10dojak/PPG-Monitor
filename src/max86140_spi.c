@@ -34,6 +34,7 @@
 
 LOG_MODULE_DECLARE(peripheral_uart, LOG_LEVEL_INF);
 
+//--------------------------------------------
 // Getting GPIO Spec from Devicetree (Proto2403 actual GPIO pins)
 #define SCK_NODE  DT_NODELABEL(max_sclk)
 #define SDI_NODE  DT_NODELABEL(max_sdi)
@@ -200,6 +201,7 @@ uint32_t* max86140_spi_read_burst(uint32_t* databuf, uint8_t reg_addr, uint8_t l
 
     return databuf;
 }
+// --------------------------------------------
 
 static inline void _max86140_set_bits(uint8_t reg, uint8_t mask)
 {

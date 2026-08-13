@@ -1,0 +1,32 @@
+updated by kelvin: 07/23/2026
+lsmd register definitions
+
+WAKE_UP_SRC
+- used to indicate the source of a wakeup event
+- 0x1B
+- Bit:   7             6                 5         4           3      2     1     0
+       reserved      SLEEP_CHANGE_IA   FF_IA     SLEEP_STATE WU_IA  X_WU  Y_WU  Z_WU
+
+- bit 3: WU_IA: 0 indicates wakeup event not detected; 1: wakeup event detected 
+- bit 2: X_WU: 1: wakeup event detected on X-axis
+- only bits 3 through 0 are used in my function 
+
+TAP_CFG0
+- used to filter wakeup detection and tap recognition
+- 0x56
+- Bit:   7             6                  5                    4           3       2          1        0
+       reserved   INT_CLR_ON READ   SLEEP_STATUS_ON_INT   SLOPE_FDS   TAP_X_EN  TAP_Y_EN  TAP_Z_EN    LIR
+
+- bit 4: 1: high pass filter applied. selects the highpass filtered acceleration signal for 
+        wakeup detection logic
+
+
+STORAGE
+Big picture
+- IndexedDB: durable storage, survives crashes and page reloads
+- in-memory "current recording" buffer: packets accumulate here while recording is active and gets 
+  flushed to IndexedDB once recording stops
+- Export functions: pull the last saved session back out and convert it to a downloadable csv or
+  json filter
+
+ 

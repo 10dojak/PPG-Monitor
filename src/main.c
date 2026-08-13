@@ -46,16 +46,13 @@
 #include <zephyr/settings/settings.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/logging/log.h>
-#include <zephyr/drivers/sensor.h>
 
+#include "lsmd.h"
 #include "max86140_spi.h"
-
-/* ── LSM6DSOTR accelerometer ───────────────────────────────────────────────── */
-#define IMU_NODE DT_NODELABEL(lsm6dsotr)
-static const struct device *imu_dev;
 
 #define LOG_MODULE_NAME peripheral_uart
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
@@ -115,6 +112,43 @@ static void al_transmit_accel(int32_t accel_cm_s2, uint8_t slot_idx)
 		}
 	}
 }
+
+/* Transmit one axis of gyro data over BLE NUS.
+ * slot_idx: 210=X, 211=Y, 212=Z.
+ * Value is angular rate in mrad/s offset by +50000 so negative rates fit in the
+ * existing unsigned text packet format. */
+static void al_transmit_gyro(int32_t gyro_mrad_s, uint8_t slot_idx)
+{
+	uint32_t encoded = (uint32_t)(gyro_mrad_s + 50000);
+	struct uart_data_t *buf = k_malloc(sizeof(*buf));
+	if (buf) {
+		buf->len = snprintf(buf->data, sizeof(buf->data),
+				    "0 %u %u\r\n", encoded, (uint32_t)slot_idx);
+		if (buf->len > 0 && buf->len < sizeof(buf->data)) {
+			k_fifo_put(&fifo_uart_rx_data, buf);
+		} else {
+			k_free(buf);
+		}
+	}
+}
+
+/* Transmit a wake-up event from the IMU.
+ * slot_idx 220 identifies the wake-up channel, and the value is a 3-bit mask:
+ * bit0=X, bit1=Y, bit2=Z. */
+static void al_transmit_wakeup(uint8_t axis_mask)
+{
+	struct uart_data_t *buf = k_malloc(sizeof(*buf));
+	if (buf) {
+		buf->len = snprintf(buf->data, sizeof(buf->data),
+				    "0 %u 220\r\n", (uint32_t)axis_mask);
+		if (buf->len > 0 && buf->len < sizeof(buf->data)) {
+			k_fifo_put(&fifo_uart_rx_data, buf);
+		} else {
+			k_free(buf);
+		}
+	}
+}
+
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -379,7 +413,7 @@ static int uart_init(void)
 
 static void adv_work_handler(struct k_work *work)
 {
-	int err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE,
+	int err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONN,
 					BT_GAP_ADV_FAST_INT_MIN_2,
 					BT_GAP_ADV_FAST_INT_MAX_2, NULL),
 				  ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
@@ -694,7 +728,7 @@ int main(void)
 	LOG_INF("NUS initialized");
 
 	/* Advertise directly — avoid workqueue indirection that can silently fail */
-	err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE,
+	err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONN,
 					BT_GAP_ADV_FAST_INT_MIN_2,
 					BT_GAP_ADV_FAST_INT_MAX_2, NULL),
 				ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
@@ -715,21 +749,19 @@ int main(void)
 	k_sleep(K_MSEC(50));
 	LOG_INF("Power rails enabled");
 
-	/* ── LSM6DSOTR init ─────────────────────────────────────────────────────
-	 * Drive SA0/SDO (P0.22) LOW before the I2C bus is probed so the chip
-	 * presents address 0x6A consistently.  Must happen before device_is_ready()
-	 * because the Zephyr I2C driver probes the address at init time.           */
-	static const struct gpio_dt_spec imu_sa0 =
-		GPIO_DT_SPEC_GET(DT_NODELABEL(imu_sa0), gpios);
-	gpio_pin_configure_dt(&imu_sa0, GPIO_OUTPUT_LOW);   /* SA0=0 → addr 0x6A */
-
-	imu_dev = DEVICE_DT_GET(IMU_NODE);
-	if (!device_is_ready(imu_dev)) {
-		LOG_ERR("LSM6DSOTR not ready — check I2C (SCL=P0.24 SDA=P0.16 addr=0x6A)");
-		imu_dev = NULL;
-	} else {
-		LOG_INF("LSM6DSOTR ready — accel ±2g @ 26 Hz, INT=P1.11");
-	}
+	/* updated by kelvin: 2026-07-14
+	 * 1. LSM6DSOTR IMU initialisation(previous initialisation was her in main.c but now moved to lsmd.c)
+	 * 2. MAX86141 U10 (primary) sensor initialisation
+	 * 3. MAX86141 U2 (mux controller) initialisation
+	 * 4. Read Part ID to confirm SPI is actually talking to the sensor
+	 * 5. Log tag histogram once at startup after the first FIFO fill (~1s)
+	 */
+	
+	// LSM6DSOTR initialisation
+	err = lsmd_init();
+	if (err) {
+		LOG_WRN("LSM6DSOTR init failed (err %d) -- continuing without IMU", err);
+	}// in case the initialisation fails, we continue without the IMU and just use the MAX86141 sensors
 
 	max86140_spi_init();
 	LOG_INF("SPI init done");
@@ -794,36 +826,57 @@ int main(void)
 
 		loop++;
 
-		/* ── LSM6DSOTR poll — fetch every loop (26 Hz IMU, 200ms loop → ~5 new) ── */
-		if (imu_dev != NULL) {
-			struct sensor_value ax, ay, az;
-			int rc = sensor_sample_fetch(imu_dev);
-			if (rc == 0) {
-				sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_X, &ax);
-				sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_Y, &ay);
-				sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_Z, &az);
+			/* ── LSM6DSOTR poll — fetch every loop (26 Hz IMU, 200ms loop → ~5 new) ── */
+			if (lsmd_is_ready()) {
+				struct lsmd_accel_sample accel_raw;
+				struct lsmd_accel_cm_s2 accel_cm;
+				struct lsmd_gyro_sample gyro_raw;
+				struct lsmd_gyro_mrad_s gyro_mrad;
+				struct lsmd_wakeup_event wake_evt;
+				int rc = lsmd_read_accel_gyro(&accel_raw, &gyro_raw);
 
-				/* Log every 5 loops (~1s) */
-				if ((loop % 5) == 0) {
-					LOG_INF("IMU accel X=%d.%02d Y=%d.%02d Z=%d.%02d m/s²",
-						ax.val1, abs(ax.val2) / 10000,
-						ay.val1, abs(ay.val2) / 10000,
-						az.val1, abs(az.val2) / 10000);
+				if (rc == 0) {
+					if ((loop % 5) == 0) {
+						LOG_INF("IMU accel X=%d.%02d Y=%d.%02d Z=%d.%02d m/s²",
+							accel_raw.x.val1, abs(accel_raw.x.val2) / 10000,
+							accel_raw.y.val1, abs(accel_raw.y.val2) / 10000,
+							accel_raw.z.val1, abs(accel_raw.z.val2) / 10000);
+						LOG_INF("IMU gyro  X=%d.%02d Y=%d.%02d Z=%d.%02d rad/s",
+							gyro_raw.x.val1, abs(gyro_raw.x.val2) / 10000,
+							gyro_raw.y.val1, abs(gyro_raw.y.val2) / 10000,
+							gyro_raw.z.val1, abs(gyro_raw.z.val2) / 10000);
+					}
+
+					if (current_conn != NULL) {
+						lsmd_accel_to_cm_s2(&accel_raw, &accel_cm);
+						lsmd_gyro_to_mrad_s(&gyro_raw, &gyro_mrad);
+						al_transmit_accel(accel_cm.x, 200); /* slot 200 = X */
+						al_transmit_accel(accel_cm.y, 201); /* slot 201 = Y */
+						al_transmit_accel(accel_cm.z, 202); /* slot 202 = Z */
+						al_transmit_gyro(gyro_mrad.x, 210); /* slot 210 = gyro X */
+						al_transmit_gyro(gyro_mrad.y, 211); /* slot 211 = gyro Y */
+						al_transmit_gyro(gyro_mrad.z, 212); /* slot 212 = gyro Z */
+					}
+				} else {
+					LOG_WRN("IMU fetch failed (err %d)", rc);
 				}
 
-				if (current_conn != NULL) {
-					/* Convert to cm/s² integer: val1*100 + val2/10000 */
-					int32_t x_cm = ax.val1 * 100 + ax.val2 / 10000;
-					int32_t y_cm = ay.val1 * 100 + ay.val2 / 10000;
-					int32_t z_cm = az.val1 * 100 + az.val2 / 10000;
-					al_transmit_accel(x_cm, 200); /* slot 200 = X */
-					al_transmit_accel(y_cm, 201); /* slot 201 = Y */
-					al_transmit_accel(z_cm, 202); /* slot 202 = Z */
+				/* Poll the IMU wake-up source after fetching accel/gyro so a motion
+				 * burst can be logged and forwarded without a separate interrupt path. */
+				rc = lsmd_poll_wakeup_event(&wake_evt);
+				if (rc == 0 && wake_evt.active) {
+					uint8_t axis_mask = (wake_evt.x ? BIT(0) : 0U) |
+							 (wake_evt.y ? BIT(1) : 0U) |
+							 (wake_evt.z ? BIT(2) : 0U);
+					LOG_INF("IMU wake-up detected (x=%u y=%u z=%u)",
+						wake_evt.x, wake_evt.y, wake_evt.z);
+					if (current_conn != NULL) {
+						al_transmit_wakeup(axis_mask);
+					}
+				} else if (rc != 0) {
+					LOG_WRN("IMU wake-up poll failed (err %d)", rc);
 				}
-			} else {
-				LOG_WRN("IMU fetch failed (err %d)", rc);
 			}
-		}
 
 		if (current_conn != NULL) {
 			/* Transmit only the most recent complete cycle (12 slots) from U10.
