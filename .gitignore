@@ -2,5 +2,11 @@
 *.swp
 *~
 
+# macOS
+.DS_Store
+
+# Xcode per-developer state
+xcuserdata/
+
 # build
 /build*/
