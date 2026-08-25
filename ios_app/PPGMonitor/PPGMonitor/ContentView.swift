@@ -4,89 +4,34 @@
 //
 
 import SwiftUI
-import Charts
 
-// MARK: - Channel configuration (what to display)
+// MARK: - Tabs (Waveforms / All 24 Channels / Acceleration)
 
-struct ChannelConfig: Identifiable {
-    let id: Int         // matches BluetoothManager channel key
-    let name: String
-    let color: Color
+enum MainTab: String, CaseIterable {
+    case waveform = "Waveforms"
+    case heatmap  = "All 24 Channels"
+    case accel    = "Acceleration"
 }
 
-let displayChannels: [ChannelConfig] = [
-    ChannelConfig(id: 9,  name: "IR   · PD2  (U10)", color: .blue),
-    ChannelConfig(id: 7,  name: "Red  · PD2  (U10)", color: .red),
-    ChannelConfig(id: 11, name: "Green· PD2  (U10)", color: .green),
-    ChannelConfig(id: 3,  name: "IR   · PD1  (U10)", color: Color(red: 0.3, green: 0.3, blue: 0.9)),
-    ChannelConfig(id: 1,  name: "Red  · PD1  (U10)", color: .orange),
-    ChannelConfig(id: 5,  name: "Green· PD1  (U10)", color: Color(red: 0.1, green: 0.7, blue: 0.3)),
-]
-
-// MARK: - Single waveform panel
-
-struct WaveformPanel: View {
-    let config: ChannelConfig
-    let points: [DataPoint]
-
-    private var yRange: ClosedRange<Double> {
-        guard points.count > 1 else { return 0...1000 }
-        let vals = points.map(\.y)
-        let lo   = vals.min()!
-        let hi   = vals.max()!
-        let pad  = max((hi - lo) * 0.1, 50)
-        return (lo - pad)...(hi + pad)
-    }
+struct PillTabBar: View {
+    @Binding var selected: MainTab
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(config.color)
-                    .frame(width: 14, height: 4)
-                Text(config.name)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
-                if let last = points.last {
-                    Text(String(format: "%.0f", last.y))
-                        .font(.caption.monospacedDigit())
-                        .foregroundColor(config.color)
-                }
-            }
-
-            if points.isEmpty {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(.systemGray6))
-                    Text("Waiting…")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .frame(height: 90)
-            } else {
-                Chart(points) { p in
-                    LineMark(
-                        x: .value("t", p.x),
-                        y: .value("ADC", p.y)
-                    )
-                    .foregroundStyle(config.color)
-                    .lineStyle(StrokeStyle(lineWidth: 1.5))
-                }
-                .chartXAxis(.hidden)
-                .chartYScale(domain: yRange)
-                .chartYAxis {
-                    AxisMarks(values: .automatic(desiredCount: 3)) { v in
-                        AxisGridLine()
-                        AxisValueLabel()
-                            .font(.system(size: 9))
-                    }
-                }
-                .frame(height: 90)
+        HStack(spacing: 4) {
+            ForEach(MainTab.allCases, id: \.self) { tab in
+                Text(tab.rawValue)
+                    .font(.subheadline.weight(selected == tab ? .semibold : .regular))
+                    .foregroundColor(selected == tab ? .primary : .secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(selected == tab ? Color.white : Color.clear)
+                    .cornerRadius(9)
+                    .shadow(color: selected == tab ? .black.opacity(0.1) : .clear, radius: 3, y: 1)
+                    .onTapGesture { selected = tab }
             }
         }
-        .padding(10)
-        .background(Color(.secondarySystemBackground))
+        .padding(4)
+        .background(Color(.systemGray5))
         .cornerRadius(12)
     }
 }
@@ -95,41 +40,136 @@ struct WaveformPanel: View {
 
 struct ContentView: View {
     @StateObject private var bt = BluetoothManager()
+    @StateObject private var sessionController = SessionController()
+    @State private var selectedTab: MainTab = .waveform
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var showExitDuringRecordingWarning = false
+    @State private var showSettings = false
 
-    // Two-column grid on iPad
-    let columns = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12),
-    ]
+    // Background color matches ppg_monitor.html's body { background: #dce8f5 }
+    private let pageBackground = Color(hex: "#dce8f5")
 
     var body: some View {
+        Group {
+            if sessionController.state == .participantEntry {
+                ParticipantEntryView(sessionController: sessionController)
+            } else {
+                recordingScreen
+            }
+        }
+        .onAppear {
+            bt.onParsedSample = { [weak sessionController] sample in
+                sessionController?.recordSample(sample)
+            }
+        }
+        // iOS gives no way to actually block backgrounding/navigation, so
+        // this is the honest version of checklist §6's "warns the user
+        // before exiting an active recording" — .inactive fires right as
+        // the user starts to leave (app switcher, incoming call, etc.),
+        // before the app is actually hidden.
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase != .active, sessionController.state == .recording {
+                showExitDuringRecordingWarning = true
+            }
+        }
+        .alert("Recording in Progress", isPresented: $showExitDuringRecordingWarning) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("A recording is still active. Keep PPG Monitor open and the device connected for the most reliable capture.")
+        }
+    }
+
+    private var recordingScreen: some View {
         NavigationView {
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(displayChannels) { ch in
-                        WaveformPanel(
-                            config: ch,
-                            points: bt.channels[ch.id] ?? []
-                        )
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        MetricCardsView(bt: bt)
+                        PillTabBar(selected: $selectedTab)
+
+                        switch selectedTab {
+                        case .waveform: WaveformChartView(bt: bt)
+                        case .heatmap:  HeatmapView(bt: bt)
+                        case .accel:    AccelView(bt: bt)
+                        }
                     }
+                    .padding()
                 }
-                .padding()
+                .background(pageBackground)
+                RecordingControlsView(sessionController: sessionController, bt: bt)
             }
             .navigationTitle("PPG Monitor")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(bt.isConnected ? Color.green : Color.orange)
-                            .frame(width: 9, height: 9)
-                        Text(bt.statusMessage)
+                    HStack(spacing: 10) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(bt.isConnected ? Color.green : Color.orange)
+                                .frame(width: 9, height: 9)
+                            Text(bt.statusMessage)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Button {
+                            if bt.isConnected {
+                                bt.disconnect()
+                            } else {
+                                bt.reconnect()
+                            }
+                        } label: {
+                            Text(bt.isConnected ? "Disconnect" : "Reconnect")
+                                .font(.caption)
+                        }
+                        signalQualityBadge
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    HStack(spacing: 12) {
+                        Text(sessionController.participantID)
                             .font(.caption)
                             .foregroundColor(.secondary)
+                        Button("Switch Participant") {
+                            sessionController.changeParticipant()
+                        }
+                        .font(.caption)
+                        .disabled(sessionController.state == .recording)
+
+                        Button {
+                            showSettings = true
+                        } label: {
+                            Image(systemName: "gearshape")
+                        }
                     }
                 }
             }
         }
         .navigationViewStyle(.stack)
+        .sheet(isPresented: $showSettings) {
+            SettingsView(bt: bt)
+        }
+    }
+
+    private var signalQualityBadge: some View {
+        let quality = bt.signalQuality
+        let color: Color = {
+            switch quality {
+            case .none: return .secondary
+            case .poor: return .red
+            case .fair: return .orange
+            case .good: return .green
+            }
+        }()
+        return HStack(spacing: 4) {
+            Image(systemName: "waveform.path.ecg")
+                .font(.caption2)
+            Text(quality.rawValue)
+                .font(.caption2.weight(.semibold))
+        }
+        .foregroundColor(color)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(color.opacity(0.12))
+        .cornerRadius(6)
     }
 }

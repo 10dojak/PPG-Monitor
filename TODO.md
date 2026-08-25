@@ -24,6 +24,380 @@ hardware yet. What's real so far:
 - Next: swap real capture data into the mock source, then build
   participant/session, recording workflow, storage/export
 
+**2026-08-20** — Session/participant layer, built as a guided
+concept-by-concept learning exercise (redone from scratch after an initial
+pass, so the underlying ideas are actually understood, not just present in
+the repo). Not wired into any screen yet — still not demonstrated running,
+so nothing below is checklist-checkable either. What's real so far:
+- `Models/ParsedSample.swift` — `Chip` (`.u10`/`.u2`/`.imu`) and
+  `StreamType` (`.ppg`/`.accel`/`.gyro`/`.wakeup`) enums, plus the
+  `ParsedSample` struct (`receivedAt`, `chip`, `stream`, `tag`, `value`,
+  `slotIdx`)
+- `Parsing/PacketParser.swift` — `parseLine(_:) -> ParsedSample?`, decodes
+  one wire line by switching on `slotIdx`'s range; returns `nil` on
+  anything malformed (wrong token count, unrecognized `slotIdx`)
+- `Session/SessionController.swift` — `SessionState` enum
+  (`participantEntry → ready → recording → stopped`) and
+  `SessionController: ObservableObject` with guard-protected transition
+  methods: `beginSession(participantID:)`, `startRecording()`,
+  `stopRecording()`, `changeParticipant()` (refuses to run while
+  `state == .recording`, so participants can't get mixed mid-session)
+- Fixed the missing `NSBluetoothAlwaysUsageDescription` Info.plist key —
+  would have crashed the app on the first real BLE scan attempt; kept from
+  the earlier pass since it's an unrelated correctness fix, not part of the
+  lesson
+- Everything above builds clean (verified via `xcodebuild`) but
+  **`ContentView` is still unchanged** — just the waveform grid, no
+  participant entry or recording controls on screen yet
+- `PPG_Monitor_Progress.pptx` (repo root) has the fuller build history as
+  slides — July 6 pre-Xcode prototype → Aug 19 Xcode project creation →
+  this session — plus a placeholder slide for a running-app screenshot
+- Next: `Session/SessionRecorder.swift` (streams samples to `raw.csv` +
+  `metadata.json`, one folder per recording), then
+  `ParticipantEntryView`/`RecordingControlsView`, then wire
+  `SessionController` into `ContentView` so the state machine actually
+  drives a screen
+
+**2026-08-25** — Built as a guided concept-by-concept learning exercise
+(FileHandle, Codable, @State/Binding, @ObservedObject vs @StateObject,
+Timer/.onReceive). Verified end-to-end via `xcodebuild` after every file plus
+a Simulator screenshot of the participant-entry screen (Continue button
+correctly disabled on empty input). Not yet checklist-checkable — recorded
+data isn't real yet, see gap below. What's real so far:
+- `Models/SessionMetadata.swift` — `Codable` struct (`participantID`,
+  `sessionID`, `startTime`, `endTime: Date?`, `measuredSampleRate: Double?`)
+- `Session/SessionRecorder.swift` — owns one recording's `raw.csv` (streamed
+  via `FileHandle`, one line per sample, header written on `start()`) and
+  `metadata.json` (written twice: once on `start()` with `endTime = nil` for
+  crash safety, once on `close()` with final `endTime`/measured rate)
+- `Views/ParticipantEntryView.swift` — text field + Continue button, calls
+  `sessionController.beginSession(participantID:)`
+- `Views/RecordingControlsView.swift` — Start/Stop buttons wired to
+  `SessionController`, live elapsed-time display (recomputed from a fixed
+  start `Date` each tick, not accumulated, so it can't drift)
+- `ContentView.swift` now switches on `sessionController.state`:
+  `.participantEntry` shows `ParticipantEntryView`, everything else shows
+  the waveform grid + `RecordingControlsView`, with a participant-ID /
+  "Change" control in the toolbar (disabled mid-recording, matching
+  `changeParticipant()`'s own guard)
+- **Known gap, not yet closed:** `SessionRecorder` isn't fed by real
+  samples yet. `BluetoothManager.parseLine` still does its own inline
+  parsing straight to `DataPoint`s for the live charts — it never goes
+  through the shared `Parsing/PacketParser.swift` / `ParsedSample`, and
+  there's no active-recorder hookup, so tapping Start/Stop today only
+  drives the UI state and timer, nothing lands on disk yet. Next real step:
+  give `BluetoothManager` a second output (parsed `ParsedSample`s, not just
+  display `DataPoint`s) and have `SessionController` own/feed a
+  `SessionRecorder` from that stream while `state == .recording`.
+
+**2026-08-25 (cont'd)** — Closed the gap above, then rebuilt the UI to match
+`ppg_monitor.html` panel-for-panel (per PLANNING.md's "match the HTML
+exactly" call, Tier 3 reinstated) — same 24 channels/colors, same HR/SpO2
+math, same heatmap, same recorder-bar semantics, not just the same look.
+Verified via a real `xcodebuild test` UI-automation run (types into the
+participant field, taps Start/Stop, switches all 3 tabs, screenshots each
+step) plus an XCTest that drives mock data through the full pipeline and
+asserts on the actual `raw.csv`/`metadata.json` written to disk — not just
+"it compiles." What's real:
+- `BluetoothManager` now parses every line through the shared
+  `PacketParser`/`ParsedSample` (removed its own duplicate inline parser),
+  publishes `onParsedSample` for `SessionController.recordSample(_:)` to
+  consume, and tracks `cntU10`/`cntU2`/`cntErr`/measured sample rate, plus
+  HR (peak-detection on U2 IR·LED1 PD4) and SpO2 (ratio-of-ratios) — ported
+  formula-for-formula from the HTML
+- `Models/PPGDataset.swift` — the 24-channel dataset table (label/chip/tag/
+  color/dash), ported verbatim from the HTML's `DATASETS`, plus the heatmap
+  tag-name tables and its color-intensity function
+- `Views/MetricCardsView.swift`, `ChannelSelectView.swift`,
+  `WaveformChartView.swift`, `HeatmapView.swift`, `AccelView.swift` — the 4
+  metric cards, grouped toggle chips, 24-series waveform chart, 2×12-slot
+  heatmap, and accel X/Y/Z panel; `ContentView` now runs a 3-tab layout
+  (Waveforms / All 24 Channels / Acceleration) instead of the old fixed
+  6-channel grid
+- `SessionController` gained `recordedSampleCount`/`recordingStartedAt`/
+  `lastSessionFolder`; `RecordingControlsView` now shows the same live
+  status text as the HTML's recorder bar and a real `ShareLink` export
+  (iOS's equivalent of the HTML's Download CSV button, per PLANNING.md's
+  "export = share sheet" call)
+- **Two real bugs found by actually running it, not just reading the
+  diff:** (1) the elapsed-recording timer never ticked, because
+  `Timer.publish(...).autoconnect()` was a plain `let` on a SwiftUI
+  `View` struct — those structs get recreated on every parent redraw
+  (here, up to ~100×/sec from streaming mock data), so the timer never
+  survived long enough to fire; fixed by making it `@State`. (2) `u2`
+  channel keys (`tag + 200`) collided with the IMU's raw-slotIdx keys
+  (200-222) — `u2` tags 1/2/10/11/12 landed on the same dictionary keys as
+  accel/gyro X/Y/Z, so the new Accel tab showed scrambled PPG counts
+  mislabeled as hundreds-of-m/s² acceleration. Fixed by moving `u2` to a
+  `+1000` offset that can't collide with either range. This was latent
+  since the very first BLE-wiring session (2026-08-19) — just never visible
+  before because nothing displayed slotIdx 200+ data until today.
+- Ported two visual quirks from the HTML **as-is**, not "fixed": the
+  heatmap's IR/Red/Green tag groupings for color intensity don't actually
+  match the tag→wavelength labels used everywhere else in the same file,
+  and the "IR Signal — 4 PDs" card is fed by tag 2/8 (which the tag-name
+  tables label Red·LED2, not IR). Worth flagging to whoever owns the HTML —
+  not changed here since the brief was to match it exactly.
+- Not yet done: physical iPad hasn't been connected this session
+  (`xcrun devicectl list devices` only sees a disconnected iPhone) — still
+  waiting on that to confirm the real-device build/run/signing path before
+  tomorrow's BLE hardware session
+- `DataSource/MockReplayDataSource.swift` now interleaves a synthetic accel
+  signal (small wobble + one motion burst) into Rutendo's real capture —
+  the capture itself has zero IMU samples, so the accel parse → unit
+  convert → magnitude/motion → chart path had never actually executed
+  before this. Verified via UI-test screenshot: real converted units
+  (~-0.1/-0.2/10.05 m/s², sane for a ~1g-resting device), correct magnitude,
+  correct "Still" badge, and visible chart motion during the synthetic
+  burst.
+
+**2026-08-25 (cont'd again)** — Worked through the remaining checklist gaps
+from the list above, all verified via `xcodebuild test` (not just built):
+- §7 "relevant calculated metrics are saved" — `SessionMetadata` gained
+  `finalHeartRateBPM`/`finalSpo2Percent`; `RecordingControlsView` passes
+  `bt.heartRateBPM`/`bt.spo2Percent` into `stopRecording(...)` on Stop &
+  Save. Verified by `mockRecordingWritesRealFiles` asserting both are
+  non-nil after enough mock data has flowed.
+- §2 "starting/stopping multiple sessions does not require restarting the
+  app" — new test `backToBackRecordingsProduceSeparateFolders`: start,
+  stop, start again on the same controller/BluetoothManager instances (no
+  relaunch), confirms two distinct, non-empty session folders.
+- §1 "clear error message when the device cannot be found" —
+  `BLEDataSource` now times out a scan after 15s with no peripheral found
+  and reports "Device not found — check PPG_DK_2026A is powered on and in
+  range" instead of sitting on "Scanning..." forever.
+- §6 "warns the user before exiting an active recording" — iOS has no way
+  to actually block backgrounding/navigation, so this is the honest
+  version: `ContentView` watches `scenePhase`, and shows an alert the
+  moment the app starts to resign active (before it's actually hidden) if
+  `state == .recording`.
+- §8 "exported data can be opened and analyzed in Python/MATLAB without
+  additional cleanup" — actually verified with `pandas.read_csv()` (no args
+  needed, correct dtypes inferred, zero NaNs) against a file built from the
+  exact format string `SessionRecorder.append()` uses. This caught a real
+  bug: **`metadata.json`'s `startTime`/`endTime` were encoded as seconds
+  since Apple's 2001 reference date** (JSONEncoder's default
+  `.deferredToDate`), not Unix epoch like `raw.csv` — anyone doing
+  `datetime.fromtimestamp(startTime)` in Python would silently get a date
+  ~31 years wrong, no error, no hint anything was off. Fixed by setting
+  `encoder.dateEncodingStrategy = .secondsSince1970` in
+  `SessionRecorder.writeMetadata()`.
+- Real robustness bug found while adding the back-to-back test: running
+  the full test suite together (vs. one test at a time) made
+  `MockReplayDataSource`'s `Timer.scheduledTimer` never fire — it schedules
+  onto "whatever run loop is current," which isn't guaranteed to be
+  actively spinning on whatever thread Swift Testing happens to run a test
+  on. Replaced with an explicit `DispatchSourceTimer` on `.main`, which
+  doesn't depend on that assumption. This is a genuine correctness fix, not
+  a test-only workaround — the same implicit-run-loop assumption could bite
+  in real app usage too, not just tests.
+- Also added `UIBackgroundModes = bluetooth-central` to the Xcode project
+  (both Debug/Release configs) so BLE data keeps flowing if the app is
+  backgrounded mid-recording, instead of silently going quiet.
+- Still open: none of these five items required real hardware, so nothing
+  new is blocked on tomorrow's BLE session — the remaining checklist items
+  (§3 long-duration/no-freeze testing, §11 strong/weak signal/motion
+  testing, actual device connect/reconnect) all genuinely need the
+  physical setup.
+
+**2026-08-25 (cont'd once more)** — Swept the rest of the checklist for
+anything still implementable without the iPad. §9's "signal-quality
+indicator" had no HTML equivalent to port, so that one specific item was a
+scope decision (kept to a simple packet/error-rate heuristic — Good/Fair/
+Poor/No Signal — rather than inventing a real amplitude-based metric).
+Everything else below was found, fixed, and proven via `xcodebuild test`:
+- §1 "user can disconnect" / "can reconnect" — `BluetoothManager` gained
+  `reconnect()`; toolbar now has a real Disconnect/Reconnect toggle.
+  Surfaced a real bug in the process: `BLEDataSource`'s existing
+  auto-reconnect-on-disconnect logic would have immediately undone a
+  deliberate user disconnect. Fixed with a `userInitiatedDisconnect` flag
+  so `didDisconnectPeripheral` only auto-rescans for *unexpected* drops.
+- §9 signal-quality indicator — added per the packet/error-rate heuristic
+  above, shown next to connection status (always visible, not buried in a
+  tab).
+- §10 "handles corrupted/incomplete packets" — added
+  `parseLineRejectsCorruptedPackets`/`parseLineHandlesWellFormedPackets`.
+  **Found a real parser bug**: `parseLine` checked token count *after*
+  `compactMap`-filtering out non-numeric tokens, so `"3 481 3 garbage"`
+  silently parsed as the clean 3-token line underneath it instead of being
+  rejected — a corrupted line could pass through undetected. Fixed by
+  checking raw token count first.
+- §10 "existing recorded data protected if an error occurs" — added
+  `dataWrittenBeforeUncleanShutdownSurvives`: writes samples via
+  `SessionRecorder`, never calls `close()` (simulating a crash), confirms
+  the data already on disk survives.
+- §11 "saved data compared against real-time display" / "exported data
+  checked against original" — added
+  `recordedCsvValuesExactlyMatchInputSamples`: exact field-by-field
+  round-trip check, not just row counts.
+- §2 "no samples unintentionally dropped" — added
+  `partialLinesSplitAcrossCallbacksAreNotDropped`, exercising the
+  line-buffering logic directly via a `TestDataSource` test double (no
+  timer/mock-replay pacing needed).
+- §3/§11 "plot doesn't freeze" / "long-duration recording tested" — added
+  `displayBuffersStayBoundedUnderHighThroughput` (20,000 synthetic samples
+  fed synchronously). **This caught a real EXC_BAD_ACCESS crash**:
+  `BluetoothManager.handle()` read `counters`/`channels` synchronously on
+  whatever thread called it, but only wrote them via a deferred
+  `DispatchQueue.main.async` — safe only because both current data sources
+  happen to already call in on main, an unstated and fragile invariant.
+  Under concurrent access this reproducibly segfaulted in
+  `Dictionary.subscript.getter`. Fixed by hopping onto main once, at the
+  top of `receive()`, so every read and write downstream is strictly
+  serialized regardless of caller's thread — real hardening, not a
+  test-only workaround, since BLE callback threading is exactly the kind
+  of thing that can differ from mock behavior in edge cases.
+- §12 README — confirmed genuinely stale (predates the Xcode project;
+  describes a 2-file app, manual project setup, says BLE-in-Simulator isn't
+  possible without mentioning the app now runs fully against mock data
+  there). **Not yet rewritten** — flagging instead of silently doing it,
+  since it's a meaningful rewrite and lower urgency than the correctness
+  fixes above.
+- Full suite: 9 unit tests + the UI screenshot flow, all passing.
+  `tagToName` (dead code left over from the pre-Tier-3 6-channel grid) and
+  a stale comment about the old `+200` u2 key offset were also cleaned up
+  in `BluetoothManager.swift` while in there.
+
+**2026-08-25 (real hardware)** — iPad connected, Developer Mode + device
+trust set up, provisioning profile auto-registered the device, app built/
+installed/launched successfully via `xcodebuild`/`devicectl` on physical
+hardware for the first time. Checked GitHub's `peripheral_uart_test` branch
+(1 commit ahead: `1ad49bc`) for firmware accel changes — confirmed the
+actual accel wire encoding (`+20000` offset, cm/s² scale, slotIdx 200-202)
+is unchanged, so our parsing is still correct. Worth flagging: that commit
+temporarily disables wake-up events (slotIdx 220, commented out pending
+accel/gyro-only testing) and adds IMU I2C "WHO_AM_I" debug probing both
+0x6A/0x6B — reads like active troubleshooting of whether the IMU responds
+at all. Worth confirming with Rutendo that real accel data is actually
+flowing reliably before relying on it in testing.
+- Corrected a scope drift from earlier: the "Share Session" single-button
+  redesign didn't actually match `ppg_monitor.html`'s two separate
+  Download CSV / Download JSON buttons — reverted to two buttons
+  (`RecordingControlsView`) to match the HTML layout exactly, while keeping
+  the earlier fix's intent (participant/session context traveling with the
+  export): each share now copies its file to a temp path renamed after the
+  session folder (e.g. `phoebeTest_abc123_..._2026....csv`) instead of
+  sharing the generically-named `raw.csv`/`metadata.json` directly.
+- Renamed the ambiguous "Change" participant-toolbar button to "Switch
+  Participant."
+- Added a real app icon — SwiftUI-rendered gradient background with a
+  stylized pulse waveform, installed into `Assets.xcassets/AppIcon.
+  appiconset` (single 1024×1024 image covering all three appearance
+  variants — default/dark/tinted).
+- All changes verified: full build + 10 unit tests passing, then installed
+  and running live on Phoebe's physical iPad (not just Simulator).
+- Changed app icon gradient from blue to teal/green per request.
+
+**2026-08-25 (real BLE was never actually wired up)** — Caught a
+significant gap while double-checking the connect flow against
+`ppg_monitor.html`'s explicit "Live → Connect modal → Scan & Connect"
+pattern: **`ContentView` always constructed `BluetoothManager()` with no
+argument, which defaults to `MockReplayDataSource`.** Everything installed
+and running on the physical iPad up to this point — including the earlier
+"confirmed running on real hardware" checks — was streaming *mock* data,
+not attempting a real BLE connection at all. There was no in-app way to
+switch to `BLEDataSource`; it required editing source and rebuilding.
+Fixed properly, not just patched:
+- `BluetoothManager.init` now resolves its data source based on
+  environment when none is explicitly passed: real `BLEDataSource` on a
+  physical device, `MockReplayDataSource` in Simulator (which has no real
+  Bluetooth radio to test against). `dataSource` is now a `var` (was
+  `let`) with a new `switchDataSource(useMock:)` method that stops the old
+  source, clears all stream state (channels, counters, HR/SpO2, error
+  counts — a half-mock/half-real dataset would be meaningless), and starts
+  the new one — all at runtime, no rebuild.
+- Added `Views/SettingsView.swift` — a sheet reachable from a new gear icon
+  in the toolbar, with a "Use Mock Data" toggle bound to the above. This is
+  the actual answer to "is there supposed to be a connect screen": the
+  HTML's explicit modal is about *initiating* a BLE scan by hand (its app
+  has no mock mode, so that's its only path in); our app already
+  auto-scans via `BLEDataSource`'s existing `centralManagerDidUpdateState`
+  logic once BLE is selected, so the missing piece wasn't a connect
+  button, it was a way to select real-BLE at all.
+- Verified: build succeeds for both Simulator and the physical iPad, full
+  10-test suite still passes (tests inject `TestDataSource`/mock
+  explicitly, unaffected by the new environment-based default), then
+  installed and launched on the iPad — this time actually attempting a
+  real BLE scan by default, confirmed via the toolbar status text.
+- This is the kind of thing that would have been a bad surprise walking
+  into tomorrow's hardware session — worth double-checking status text on
+  the iPad now reads a real scanning/connection state, not "Replaying mock
+  data," before considering device-side setup done.
+
+**2026-08-25 (final sweep)** — One more real gap plus the README:
+- §5 — `changeParticipant()` wasn't clearing `lastSessionFolder`/
+  `recordedSampleCount`, so switching participants left the *previous*
+  participant's "Last saved..." summary showing in the recorder bar until
+  the new one recorded something. Not actual data mixing, but stale state
+  that could read as the wrong session. Fixed + new test
+  `changeParticipantClearsPreviousSessionSummary`.
+- README.md rewritten — it predated the Xcode project entirely (described
+  a 2-file app, manual project creation, claimed BLE-in-Simulator wasn't
+  possible without mentioning mock-data mode). Now has the real file
+  structure, actual `xcodebuild build`/`test` commands, and — since §12
+  explicitly wants it — a documented `raw.csv` column reference,
+  `metadata.json` field reference, and a "Tunable thresholds" pointer
+  (HR/SpO2 ranges, motion threshold, signal-quality cutoffs, heatmap max,
+  BLE scan timeout) so changing any of those later doesn't require
+  re-reading the source to find them.
+- Full suite (10 unit tests + UI flow) passing, final build clean.
+- Everything left on the checklist now genuinely needs the physical
+  iPad + BLE hardware — nothing else identified as implementable/testable
+  without it.
+
+**2026-08-25 (one more pass)** — `BLEDataSource` had three genuinely missing
+error paths that a code-review pass (not a test, since Simulator has no
+real BLE to exercise this against) turned up:
+- No `centralManager(_:didFailToConnect:error:)` handler at all — a failed
+  connection attempt (distinct from a later unexpected disconnect, which
+  *was* handled) left the app stuck on "Connecting to X…" forever, no
+  error, no retry.
+- `didDiscoverServices`/`didDiscoverCharacteristicsFor` ignored their
+  `error` parameters and silently no-op'd if the expected service/
+  characteristic wasn't found — same failure mode: "Connected" shown
+  forever, zero data, zero explanation.
+
+  All three now surface a clear status message and reuse the existing
+  auto-retry path (disconnecting non-user-initiated triggers
+  `didDisconnectPeripheral`'s auto-rescan) rather than adding a second retry
+  mechanism. Build + full test suite (10 tests) still clean after this.
+- This is a code-review-only fix — Simulator can't run real CoreBluetooth,
+  so it's verified by build/logic review, not a runtime test, unlike
+  everything else fixed today. Flagging that distinction explicitly.
+- At this point I've been through every checklist section more than once.
+  I don't have anything further to propose without hardware — the honest
+  status is "done until the iPad connects," not "still searching."
+
+**2026-08-25 (full checklist audit)** — Went through all 85 checklist lines
+(§1-13) explicitly, one by one, classifying each as demonstrated / coded-
+but-hardware-blocked / genuine gap, instead of only opportunistically
+hunting for bugs. Found two more real gaps and one non-code item:
+- §8 "participant/session information is included" — **the Share button
+  only shared `raw.csv`**, not `metadata.json`. Participant ID/session ID/
+  timestamps only ever lived in the folder name, which doesn't travel with
+  a share — AirDrop or save-to-Files would hand someone a generic
+  "raw.csv" with no participant/session context anywhere in it. Fixed:
+  `RecordingControlsView` now shares both files together via
+  `ShareLink(items:)`, renamed "Share CSV" → "Share Session" to reflect
+  that.
+- §3 "plot axes are appropriately labeled" — waveform and accel charts had
+  `.chartXAxis(.hidden)`, so only the Y axis was ever labeled. Added
+  labeled X-axis gridlines to both. Honest caveat: it labels the rolling
+  sample index, not wall-clock time like the HTML's x-axis — `DataPoint`
+  only ever stored an `Int` index, not a per-point timestamp, so matching
+  the HTML exactly here would need a small data-model change. Flagged
+  rather than silently doing a bigger change or overclaiming parity.
+- §12 "latest working version is pushed to the repository" — **currently
+  false**. Everything from today is uncommitted locally. Not committing/
+  pushing without being asked — that's Phoebe's call, flagging it plainly.
+- Full audit otherwise confirmed the checklist is in the state described
+  across the entries above: everything demonstrable without hardware has
+  been demonstrated (via the 10 unit tests + UI flow), everything else
+  (§1 real BLE connect/discover/stability, §4 real accel sampling rate,
+  §11 strong/weak-signal/motion/repeated-disconnect testing) is
+  genuinely blocked on the physical iPad + device.
+- Full suite still passing (10 unit tests + UI flow) after this round.
+
 ## 1. Device Connection & Bluetooth
 - [ ] App provides a clear error message when the device cannot be found
 - [ ] Connection remains stable during a full data-collection session

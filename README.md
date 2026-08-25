@@ -34,8 +34,20 @@ PPG-Monitor/
 ├── Kconfig.sysbuild         # Sysbuild Kconfig
 ├── ppg_monitor.html         # Web BLE monitor (Chrome on desktop/Android)
 └── ios_app/
-    ├── BluetoothManager.swift   # Core Bluetooth BLE manager
-    └── ContentView.swift        # SwiftUI live waveform display
+    └── PPGMonitor/                       # Xcode project (PPGMonitor.xcodeproj)
+        ├── PPGMonitor/
+        │   ├── PPGMonitorApp.swift       # App entry point
+        │   ├── ContentView.swift         # Tab layout, toolbar, top-level state
+        │   ├── BluetoothManager.swift    # Owns a PPGDataSource, publishes parsed/display data + HR/SpO2
+        │   ├── DataSource/               # PPGDataSource protocol + BLEDataSource / MockReplayDataSource
+        │   ├── Parsing/PacketParser.swift    # Wire-format line -> ParsedSample
+        │   ├── Models/                   # ParsedSample, PPGDataset (24-channel table), SessionMetadata
+        │   ├── Session/                  # SessionController (state machine), SessionRecorder (CSV/JSON writer)
+        │   ├── Views/                    # ParticipantEntryView, RecordingControlsView, MetricCardsView,
+        │   │                             # WaveformChartView, ChannelSelectView, HeatmapView, AccelView, BadgeView
+        │   └── Mock/sample_session.txt   # Real BLE capture used by MockReplayDataSource
+        ├── PPGMonitorTests/              # Unit tests (Swift Testing) — parser, recorder, thread-safety
+        └── PPGMonitorUITests/            # XCUITest — drives the full recording flow, screenshots each step
 ```
 
 ---
@@ -105,23 +117,82 @@ A single-file HTML app using Web Bluetooth and Chart.js.
 
 ---
 
-## iOS App (`ios_app/`)
+## iOS App (`ios_app/PPGMonitor/`)
 
-Native iPad/iPhone app built with SwiftUI and Core Bluetooth.
+Native iPad app built with SwiftUI, Swift Charts, and Core Bluetooth. UI is a
+panel-for-panel port of `ppg_monitor.html` — same 24 channels/colors, same
+tabs (Waveforms / All 24 Channels / Acceleration), same HR/SpO2 math, same
+recorder-bar behavior — not just visually, but functionally: toggling a
+channel chip actually shows/hides that series, Start/Stop actually records
+real samples to disk, Download CSV/Download JSON are the native equivalent
+of the HTML's own two download buttons.
 
-**Requirements:** Xcode 15+, iOS 16+, physical device (BLE not available in simulator)
+**Requirements:** Xcode 15+, iOS 16+. A physical iPad is only required to
+test against real BLE hardware — the whole app, including a full recording,
+also runs against mock data (`Mock/sample_session.txt`, a real capture with
+zero IMU samples — see `MockReplayDataSource.swift` for how it interleaves a
+synthetic accel signal to still exercise that path) in the Simulator with no
+device at all.
 
-**Setup:**
-1. Create a new Xcode project named `PPG Monitor`
-2. Replace `ContentView.swift` and add `BluetoothManager.swift` with the files in `ios_app/`
-3. Add `NSBluetoothAlwaysUsageDescription` to `Info.plist`
-4. Build and run on a physical device
+**Build & run:**
+```bash
+cd ios_app/PPGMonitor
+open PPGMonitor.xcodeproj
+# ⌘R in Xcode, or from the command line:
+xcodebuild -project PPGMonitor.xcodeproj -scheme PPGMonitor \
+  -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build
+```
+Data source defaults automatically: real `BLEDataSource` on a physical
+device, `MockReplayDataSource` in Simulator (which has no Bluetooth radio to
+test against). A Settings toggle (gear icon, top-right toolbar) switches
+between the two at runtime — no source edit or rebuild needed.
 
-**Features:**
-- Auto-scans and connects to `PPG_DK_2026A` on launch
-- 6-panel live waveform grid (Red, IR, Green × 2 photodiodes)
-- Auto-scaling Y axis per channel
-- Rolling 200-sample window
+On a machine other than the original developer's, Xcode's automatic signing
+will prompt to select a different Apple Developer Team the first time the
+project is opened (the project's `DEVELOPMENT_TEAM` is bound to one
+specific account) — a one-time, one-click step, not a code change.
+
+**Run the tests:**
+```bash
+xcodebuild test -project PPGMonitor.xcodeproj -scheme PPGMonitor \
+  -destination 'platform=iOS Simulator,name=<a simulator name>'
+```
+`PPGMonitorTests` covers packet parsing (including corrupted/malformed
+input), the recording pipeline end-to-end (real files asserted on disk, not
+mocked), crash-safety (data written before an unclean shutdown survives),
+and thread-safety. `PPGMonitorUITests` drives the actual participant-entry →
+record → stop → tab-switching flow via `XCUIApplication` and screenshots
+each step.
+
+**Exported data format** (`Documents/Sessions/{participantID}_{sessionID}_{timestamp}/`):
+
+`raw.csv` — one row per sample, streamed as it arrives (not buffered then
+written, so a crash mid-recording only loses the last unflushed sample, not
+the whole file):
+
+| Column | Meaning |
+|---|---|
+| `timestamp` | Unix epoch seconds (`Double`) — wall-clock receive time, not on-device sample time (the wire format has no on-device timestamp) |
+| `chip` | `u10` / `u2` / `imu` |
+| `stream` | `ppg` / `accel` / `gyro` / `wakeup` |
+| `tag` | MAX86141 FIFO tag (1–12), or `0` for all IMU streams |
+| `value` | Raw wire value — 19-bit ADC count for PPG, offset-encoded for IMU (see `README`'s BLE Data Format section above) |
+| `slotIdx` | 0–11 = U10, 128–139 = U2, 200–202 = accel X/Y/Z, 210–212 = gyro X/Y/Z, 220 = wake-up |
+
+`metadata.json` — `participantID`, `sessionID`, `startTime`/`endTime` (Unix
+epoch seconds — matches `raw.csv`'s convention, *not* `JSONEncoder`'s
+default of seconds-since-2001), `measuredSampleRate` (actual observed rate,
+not the 25 SPS spec), `finalHeartRateBPM`/`finalSpo2Percent` (last computed
+values at stop time, `null` if never enough data to compute). Written twice
+— once at `start()` with `endTime: null` for crash safety, again at
+`close()` with final values.
+
+**Tunable thresholds** (all in `BluetoothManager.swift` unless noted):
+HR normal range 50–110 BPM, SpO2 normal ≥95%, motion-detected deviation from
+1g >0.5 m/s² (`AccelView.swift`), signal quality Good/Fair/Poor error-rate
+cutoffs at 2%/10% (`signalQuality`), heatmap color intensity max value
+`HEAT_MAX`-equivalent 300,000 (`Models/PPGDataset.swift`), BLE scan timeout
+15s (`BLEDataSource.swift`).
 
 ---
 
