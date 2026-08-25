@@ -2,141 +2,358 @@
  * Copyright (c) 2022 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ *
+ * Proto2403 custom PCB overlay
+ *
+ * Current build target:
+ *     nrf21540dk/nrf52840
+ *
+ * This overlay overrides the DK pin assignments with the actual
+ * connections used on the Proto2403 PCB.
  */
 
 #include <dt-bindings/pinctrl/nrf-pinctrl.h>
 
-/*
- * Remap uart0 TX away from P0.06 — the nrf52840dk board DTS puts uart0 TX on
- * P0.06 by default, which conflicts with MAX_CSB1 also on P0.06.
- * On Proto2403 physical UART is unused (all comms via BLE NUS), so we move
- * TX to P1.00 which is free.  RTS/CTS/RX stay on their original pins.
- */
-&pinctrl {
-    /* ── LSM6DSOTR I2C0 ──────────────────────────────────────────────────────
-     * SCL    = P0.24
-     * SDA    = P0.16
-     * SDO/SA0= P0.22  (driven LOW by firmware → I2C addr 0x6A;
-     *                   change reg to 0x6b and drive HIGH for 0x6B)
-     * INT    = P1.11  (data-ready interrupt — wired to drdy-gpios below)
-     * ─────────────────────────────────────────────────────────────────────── */
-    i2c0_default_alt: i2c0_default_alt {
-        group1 {
-            psels = <NRF_PSEL(TWIM_SCL, 0, 24)>,   /* P0.24 — IMU SCL */
-                    <NRF_PSEL(TWIM_SDA, 0, 16)>;   /* P0.16 — IMU SDA */
-            bias-pull-up;
-        };
-    };
-    i2c0_sleep_alt: i2c0_sleep_alt {
-        group1 {
-            psels = <NRF_PSEL(TWIM_SCL, 0, 24)>,
-                    <NRF_PSEL(TWIM_SDA, 0, 16)>;
-            low-power-enable;
-        };
-    };
 
-    uart0_default_alt: uart0_default_alt {
-        group1 {
-            psels = <NRF_PSEL(UART_TX,  1,  0)>,   /* P1.00 — free on Proto2403 */
-                    <NRF_PSEL(UART_RTS, 0,  5)>;
-        };
-        group2 {
-            psels = <NRF_PSEL(UART_RX,  0,  8)>,
-                    <NRF_PSEL(UART_CTS, 0,  7)>;
-            bias-pull-up;
-        };
-    };
-    uart0_sleep_alt: uart0_sleep_alt {
-        group1 {
-            psels = <NRF_PSEL(UART_TX,  1,  0)>,
-                    <NRF_PSEL(UART_RTS, 0,  5)>;
-            low-power-enable;
-        };
-        group2 {
-            psels = <NRF_PSEL(UART_RX,  0,  8)>,
-                    <NRF_PSEL(UART_CTS, 0,  7)>;
-            low-power-enable;
-        };
-    };
+/* =========================================================================
+ * PIN CONTROL
+ * =========================================================================
+ */
+
+&pinctrl {
+
+	/* ---------------------------------------------------------------------
+	 * LSM6DSOTR I2C0
+	 *
+	 * Proto2403 schematic:
+	 *
+	 *   IMU1_SCL -> P0.11
+	 *   IMU1_SDA -> P0.07
+	 *
+	 * ---------------------------------------------------------------------
+	 */
+
+	i2c0_default_alt: i2c0_default_alt {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SCL, 0, 11)>,
+				<NRF_PSEL(TWIM_SDA, 0, 7)>;
+
+			bias-pull-up;
+		};
+	};
+
+	i2c0_sleep_alt: i2c0_sleep_alt {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SCL, 0, 11)>,
+				<NRF_PSEL(TWIM_SDA, 0, 7)>;
+
+			low-power-enable;
+		};
+	};
+
+
+	/* ---------------------------------------------------------------------
+	 * UART0 remapping
+	 *
+	 * Proto2403 communicates with the host using BLE NUS rather than a
+	 * physical UART.
+	 *
+	 * The DK's default UART pins overlap pins used by Proto2403 hardware,
+	 * so move UART0 onto otherwise-unused P1 pins.
+	 *
+	 * ---------------------------------------------------------------------
+	 */
+
+	uart0_default_alt: uart0_default_alt {
+		group1 {
+			psels = <NRF_PSEL(UART_TX,  1, 1)>,
+				<NRF_PSEL(UART_RTS, 1, 4)>;
+		};
+
+		group2 {
+			psels = <NRF_PSEL(UART_RX,  1, 7)>,
+				<NRF_PSEL(UART_CTS, 1, 10)>;
+
+			bias-pull-up;
+		};
+	};
+
+	uart0_sleep_alt: uart0_sleep_alt {
+		group1 {
+			psels = <NRF_PSEL(UART_TX,  1, 1)>,
+				<NRF_PSEL(UART_RTS, 1, 4)>;
+
+			low-power-enable;
+		};
+
+		group2 {
+			psels = <NRF_PSEL(UART_RX,  1, 7)>,
+				<NRF_PSEL(UART_CTS, 1, 10)>;
+
+			low-power-enable;
+		};
+	};
 };
+
+
+/* =========================================================================
+ * UART0
+ * =========================================================================
+ */
 
 &uart0 {
-    pinctrl-0 = <&uart0_default_alt>;
-    pinctrl-1 = <&uart0_sleep_alt>;
-    pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&uart0_default_alt>;
+	pinctrl-1 = <&uart0_sleep_alt>;
+	pinctrl-names = "default", "sleep";
 };
 
-/*
- * The nrf52840dk board DTS marks several pins as reserved-GPIO because they
- * are used for board peripherals (UART, QSPI flash, NFC).  On Proto2403 none
- * of those peripherals are present, so we lift all the software-imposed
- * reservations except the hardware-mandated crystal pins (P0.00-P0.01).
+
+/* =========================================================================
+ * GPIO0
  *
- * Original board reserved ranges that we remove:
- *   <0x6 0x1>  — P0.06 (was uart0 TX, now remapped to P1.00)
- *   <0x8 0x3>  — P0.08-P0.10 (uart0 RX, NFC1, NFC2 — none used on Proto2403)
- *   <0x11 0x7> — P0.17-P0.23 (QSPI flash — not present on Proto2403)
+ * Remove DK-specific GPIO reservations that do not apply to Proto2403.
+ *
+ * Keep only P0.00-P0.01 reserved.
+ *
+ * Also use GPIO hogs to establish the IMU's required electrical state
+ * before the Zephyr sensor driver attempts to probe it.
+ * =========================================================================
  */
+
 &gpio0 {
-    gpio-reserved-ranges = <0 2>;   /* keep only P0.00-P0.01 (crystal oscillator) */
+
+	gpio-reserved-ranges = <0 2>;
+
+
+	/* ---------------------------------------------------------------------
+	 * TPS7A0518 / VDDA enable
+	 *
+	 * Proto2403:
+	 *
+	 *   P0.08 -> TPS_EN
+	 *            |
+	 *            v
+	 *        TPS7A0518
+	 *            |
+	 *            v
+	 *           VDDA
+	 *
+	 * The LSM6DSOTR VDD/VDDIO are supplied from VDDA.
+	 *
+	 * This must be HIGH before the LSM6DSO Zephyr driver initializes.
+	 * ---------------------------------------------------------------------
+	 */
+
+	tps_vdda_boot_hog {
+		gpio-hog;
+		gpios = <8 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "tps_vdda_boot_on";
+	};
+
+
+	/* ---------------------------------------------------------------------
+	 * LSM6DSOTR SDO/SA0
+	 *
+	 * Proto2403:
+	 *
+	 *   P0.25 -> IMU1_SDO -> LSM6DSOTR SDO/SA0
+	 *
+	 * SA0 LOW  -> I2C address 0x6A
+	 * SA0 HIGH -> I2C address 0x6B
+	 *
+	 * Drive LOW before the sensor driver probes the device.
+	 * ---------------------------------------------------------------------
+	 */
+
+	/* ---------------------------------------------------------------------
+	 * LSM6DSOTR CS
+	 *
+	 * Proto2403:
+	 *
+	 *   P0.13 -> IMU1_CS -> LSM6DSOTR CS
+	 *
+	 * CS must be HIGH for I2C operation.
+	 * ---------------------------------------------------------------------
+	 */
+
+	imu_cs_boot_hog {
+		gpio-hog;
+		gpios = <13 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "imu_cs_boot_high";
+	};
 };
 
-/* ── LSM6DSOTR I2C0 controller ─────────────────────────────────────────────── */
-&i2c0 {
-    compatible = "nordic,nrf-twim";
-    status = "okay";
-    pinctrl-0 = <&i2c0_default_alt>;
-    pinctrl-1 = <&i2c0_sleep_alt>;
-    pinctrl-names = "default", "sleep";
-    clock-frequency = <I2C_BITRATE_FAST>;   /* 400 kHz */
 
-    lsm6dsotr: lsm6dsotr@6a {
-        compatible = "st,lsm6dso";          /* LSM6DSOTR is register-compatible */
-        reg = <0x6a>;                       /* SA0/SDO = P0.22 driven LOW → 0x6A */
-        /* drdy-gpios removed — NCS 2.9.0 binding doesn't declare this property.
-         * Using TRIGGER_NONE (polling) instead; INT pin (P1.11) left unused.
-         * If trigger is needed later, try irq-gpios = <&gpio1 11 GPIO_ACTIVE_HIGH>
-         * (older NCS naming) and switch to CONFIG_LSM6DSO_TRIGGER_GLOBAL_THREAD=y */
+/* =========================================================================
+ * I2C0 + LSM6DSOTR
+ * =========================================================================
+ */
+
+&i2c0 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+
+	pinctrl-0 = <&i2c0_default_alt>;
+	pinctrl-1 = <&i2c0_sleep_alt>;
+	pinctrl-names = "default", "sleep";
+
+	clock-frequency = <I2C_BITRATE_FAST>;
+
+
+	lsm6dsotr: lsm6dsotr@6b {
+        compatible = "st,lsm6dso";
+        reg = <0x6b>;
+
+        /*
+        * Do not initialize the IMU during Zephyr boot.
+        * Proto2403 powers VDDA later from main().
+        */
+        zephyr,deferred-init;
     };
 };
+
+
+/* =========================================================================
+ * APPLICATION GPIO NODES
+ *
+ * Existing C code uses patterns such as:
+ *
+ *     GPIO_DT_SPEC_GET(DT_NODELABEL(max_sclk), gpios)
+ *     GPIO_DT_SPEC_GET(DT_NODELABEL(tps_en), gpios)
+ *     GPIO_DT_SPEC_GET(DT_NODELABEL(imu_sa0), gpios)
+ *
+ * Therefore these nodes need a binding that defines the "gpios" property.
+ * Keeping the gpio-keys container allows the existing code to work.
+ * =========================================================================
+ */
 
 / {
-    chosen {
-        nordic,nus-uart = &uart0;
-    };
-    proto2403_pins {
-        compatible = "gpio-keys";
-        max_sclk: max_sclk {
-            gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;  /* P0.15 — Proto2403 SCLK */
-            label = "MAX_SCLK";
-        };
-        max_sdi: max_sdi {
-            gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;   /* P0.06 — Proto2403 SDI (MOSI) */
-            label = "MAX_SDI";
-        };
-        max_sdo: max_sdo {
-            gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;  /* P0.12 — Proto2403 SDO (MISO) */
-            label = "MAX_SDO";
-        };
-        max_csb1: max_csb1 {
-            gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;  /* P0.17 — Proto2403 CSB1 (U10 primary) */
-            label = "MAX_CSB1";
-        };
-        max_csb2: max_csb2 {
-            gpios = <&gpio0 27 GPIO_ACTIVE_HIGH>;  /* P0.27 — Proto2403 CSB2 (U2 secondary, ISP1807 pad39) */
-            label = "MAX_CSB2";
-        };
-        tps_en: tps_en {
-            gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;
-            label = "TPS_EN";
-        };
-        mcp_en: mcp_en {
-            gpios = <&gpio0 31 GPIO_ACTIVE_HIGH>;  /* P0.31/AIN7 — MCP16411 VLED enable */
-            label = "MCP_EN";
-        };
-        imu_sa0: imu_sa0 {
-            gpios = <&gpio0 22 GPIO_ACTIVE_HIGH>;  /* P0.22 — LSM6DSOTR SDO/SA0 (LOW=0x6A) */
-            label = "IMU_SA0";
-        };
-    };
+
+	chosen {
+		nordic,nus-uart = &uart0;
+	};
+
+
+	proto2403_pins {
+		compatible = "gpio-keys";
+
+
+		/* =============================================================
+		 * MAX86141 software SPI
+		 * =============================================================
+		 */
+
+		max_sclk: max_sclk {
+			/*
+			 * P0.15 -> MAX_SCLK
+			 */
+			gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+			label = "MAX_SCLK";
+		};
+
+		max_sdi: max_sdi {
+			/*
+			 * P0.06 -> MAX_SDI / MOSI
+			 */
+			gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+			label = "MAX_SDI";
+		};
+
+		max_sdo: max_sdo {
+			/*
+			 * P0.12 -> MAX_SDO / MISO
+			 */
+			gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
+			label = "MAX_SDO";
+		};
+
+
+		/* =============================================================
+		 * MAX86141 chip selects
+		 * =============================================================
+		 */
+
+		max_csb1: max_csb1 {
+			/*
+			 * P0.17 -> MAX_CSB1
+			 */
+			gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
+			label = "MAX_CSB1";
+		};
+
+		max_csb2: max_csb2 {
+			/*
+			 * P0.27 -> MAX_CSB2
+			 */
+			gpios = <&gpio0 27 GPIO_ACTIVE_HIGH>;
+			label = "MAX_CSB2";
+		};
+
+
+		/* =============================================================
+		 * POWER CONTROL
+		 * =============================================================
+		 */
+
+		tps_en: tps_en {
+			/*
+			 * P0.08 -> TPS7A0518 EN
+			 *
+			 * Enables VDDA.
+			 */
+			gpios = <&gpio0 8 GPIO_ACTIVE_HIGH>;
+			label = "TPS_EN";
+		};
+
+		mcp_en: mcp_en {
+			/*
+			 * P0.31 -> MCP16411 EN
+			 *
+			 * Controls VLED boost supply.
+			 */
+			gpios = <&gpio0 31 GPIO_ACTIVE_HIGH>;
+			label = "MCP_EN";
+		};
+
+
+		/* =============================================================
+		 * LSM6DSOTR CONTROL SIGNALS
+		 * =============================================================
+		 */
+
+		imu_sa0: imu_sa0 {
+			/*
+			 * P0.25 -> IMU1_SDO -> SDO/SA0
+			 *
+			 * LOW = I2C address 0x6A
+			 */
+			gpios = <&gpio0 25 GPIO_ACTIVE_HIGH>;
+			label = "IMU_SA0";
+		};
+
+		imu_cs: imu_cs {
+			/*
+			 * P0.13 -> IMU1_CS
+			 *
+			 * HIGH = I2C mode
+			 */
+			gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
+			label = "IMU_CS";
+		};
+
+		imu_int1: imu_int1 {
+			/*
+			 * P1.14 <- LSM6DSOTR INT1
+			 *
+			 * Not currently used.
+			 *
+			 * Reserved for future interrupt-based wake-up
+			 * or data-ready handling.
+			 */
+			gpios = <&gpio1 14 GPIO_ACTIVE_HIGH>;
+			label = "IMU_INT1";
+		};
+	};
 };

@@ -33,12 +33,16 @@ LOG_MODULE_DECLARE(peripheral_uart, LOG_LEVEL_INF);
  * must happen before we ask Zephyr for the sensor device instance. */
 static const struct gpio_dt_spec imu_sa0 =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(imu_sa0), gpios);
+/* Wake-up register access is parked for now alongside the rest of the wake-up path.
 static const struct i2c_dt_spec imu_i2c = I2C_DT_SPEC_GET(LSMD_NODE);
+*/
 
 // The Zephyr device instance for the LSM6DSOTR IMU. This is NULL until lsmd_init() is called and succeeds. */	
 static const struct device *lsmd_dev;
 
+/* Wake-up state is commented out for now so the IMU can be tested as accel/gyro only.
 static bool wakeup_latched;// This boolean variable is used to track whether a wake-up event has been latched. It is set to true when a wake-up event is detected and remains true until the event is cleared. This prevents multiple wake-up events from being reported for the same motion burst.
+*/
 
 /* Convert Zephyr's fixed-point sensor_value into integer cm/s^2 so the BLE transport
  * can reuse the existing unsigned integer packet format. */
@@ -92,6 +96,7 @@ bool lsmd_is_ready(void)
  * interrupt engine, select the slope filter, apply a modest threshold, and
  * route the wake-up event to INT1 even though we currently poll the status
  * register in firmware instead of attaching a GPIO interrupt handler. */
+/*
 static int lsmd_enable_wakeup_detect(void)
 {
 	int err;
@@ -126,40 +131,57 @@ static int lsmd_enable_wakeup_detect(void)
 				       LSMD_WAKE_ROUTE_INT1_BIT,
 				       LSMD_WAKE_ROUTE_INT1_BIT);
 }
+*/
 
 /* Bring up the IMU path for this board:
  * 1. Force SA0 low so the device responds at 0x6A.
  * 2. Resolve the devicetree sensor instance.
- * 3. Verify Zephyr successfully initialized the sensor driver. */
+ * 3. Run the deferred Zephyr sensor initialization once power is up. */
 int lsmd_init(void)
 {
-	int err;
+    int err;
+    struct sensor_value odr;
 
-	err = gpio_pin_configure_dt(&imu_sa0, GPIO_OUTPUT_LOW); // Drive SA0 low to select I2C address 0x6A
-	if (err) {
-		LOG_ERR("Failed to drive IMU SA0 low (err %d)", err);
-		lsmd_dev = NULL;
-		return err;
-	}
+    lsmd_dev = DEVICE_DT_GET(LSMD_NODE);
 
-	lsmd_dev = DEVICE_DT_GET(LSMD_NODE);// Get the device instance for the LSM6DSOTR IMU from the device tree using the node label "lsm6dsotr"
-	// Check if the device instance is ready. If not, log an error and return -ENODEV.
-	if (!device_is_ready(lsmd_dev)) {
-		LOG_ERR("LSM6DSOTR not ready -- check I2C (SCL=P0.24 SDA=P0.16 addr=0x6A)");
-		lsmd_dev = NULL;
-		return -ENODEV;
-	}
+    err = device_init(lsmd_dev);
+    if (err && err != -EALREADY) {
+        LOG_ERR("Failed to initialize LSM6DSOTR driver (err %d)", err);
+        lsmd_dev = NULL;
+        return err;
+    }
 
-	err = lsmd_enable_wakeup_detect();
-	if (err) {
-		LOG_ERR("LSM6DSOTR wake-up config failed (err %d)", err);
-		lsmd_dev = NULL;
-		return err;
-	}
+    if (!device_is_ready(lsmd_dev)) {
+        LOG_ERR("LSM6DSOTR still not ready after device_init()");
+        lsmd_dev = NULL;
+        return -ENODEV;
+    }
 
-	wakeup_latched = false;
-	LOG_INF("LSM6DSOTR ready -- accel ±2g @ 26 Hz, gyro active, wake-up detect enabled");
-	return 0;
+    /* Enable accelerometer and gyro at 26 Hz */
+    odr.val1 = 26;
+    odr.val2 = 0;
+
+    err = sensor_attr_set(lsmd_dev,
+                          SENSOR_CHAN_ACCEL_XYZ,
+                          SENSOR_ATTR_SAMPLING_FREQUENCY,
+                          &odr);
+    if (err) {
+        LOG_ERR("Failed to set accel ODR (err %d)", err);
+        return err;
+    }
+
+    err = sensor_attr_set(lsmd_dev,
+                          SENSOR_CHAN_GYRO_XYZ,
+                          SENSOR_ATTR_SAMPLING_FREQUENCY,
+                          &odr);
+    if (err) {
+        LOG_ERR("Failed to set gyro ODR (err %d)", err);
+        return err;
+    }
+
+    LOG_INF("LSM6DSOTR ready at 0x6B -- accel/gyro @ 26 Hz");
+
+    return 0;
 }
 
 /* Internal helper that fetches one fresh IMU sample, then optionally copies the
@@ -289,6 +311,7 @@ int lsmd_read_gyro_mrad_s(struct lsmd_gyro_mrad_s *sample)
 /* WAKE_UP_SRC exposes both the event flag and which axes crossed the threshold.
  * We return only the rising edge of wu_ia so the app sees one wake-up event per
  * motion burst instead of logging/transmitting the same event every loop. */
+/*
 int lsmd_poll_wakeup_event(struct lsmd_wakeup_event *event)
 {
 	int err;
@@ -324,3 +347,4 @@ int lsmd_poll_wakeup_event(struct lsmd_wakeup_event *event)
 	wakeup_latched = active;// Update the wakeup_latched variable to reflect the current state of the wake-up event. If a wake-up event is active, this variable is set to true, preventing multiple wake-up events from being reported for the same motion burst.
 	return 0;
 }
+*/
