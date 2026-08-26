@@ -56,6 +56,15 @@ struct PPGMonitorTests {
         #expect(metadata.participantID == participantID)
         #expect(metadata.endTime != nil)
         #expect((metadata.measuredSampleRate ?? 0) > 0)
+        // §2/§4: PPG and accel each need their own measured rate — the
+        // combined rate above doesn't tell you either stream's actual rate.
+        #expect((metadata.measuredPPGSampleRate ?? 0) > 0)
+        #expect((metadata.measuredAccelSampleRate ?? 0) > 0)
+        // §4/§7: fixed acquisition settings (ADC range, LED currents, accel
+        // range/ODR) travel with the recording, not just in the README.
+        #expect(metadata.acquisitionSettings.nominalPPGSampleRateHz == 25)
+        #expect(metadata.acquisitionSettings.accelRangeG == 2)
+        #expect(metadata.acquisitionSettings.accelNominalODRHz == 26)
         // HR/SpO2 need enough rolling samples to compute (§7: calculated
         // metrics are saved) — 1.5s of ~100 lines/sec mock data is enough.
         #expect(metadata.finalHeartRateBPM != nil)

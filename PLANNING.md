@@ -18,7 +18,12 @@ until real BLE testing is unavoidable.**
 - KR3: Real BLE path validated against actual hardware once available, with no
   behavior change required in the UI/session/storage layers
 - KR4: Exported CSV opens in Python with no manual cleanup — actually tested,
-  not assumed
+  not assumed. **Verified 2026-08-25**: ran `SessionRecorder`'s real
+  production code standalone (compiled outside the simulator sandbox) against
+  a mixed PPG/accel/gyro/wakeup/corrupted-line input, loaded the resulting
+  `raw.csv`/`metadata.json` into pandas — clean dtypes, no nulls, timestamp
+  converts directly to a real datetime, metadata parses straight into usable
+  Python objects.
 - KR5: Tier 2 (test pass + docs) done, Tier 3 (heatmap, live HR/SpO2 —
   reinstated by the "match the HTML exactly" decision) explicitly scoped in
 

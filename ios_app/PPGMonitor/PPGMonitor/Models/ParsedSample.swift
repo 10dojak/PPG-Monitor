@@ -11,7 +11,7 @@ enum Chip: Equatable {
     case imu
 }
 
-enum StreamType: Equatable {
+enum StreamType: Hashable {
     case ppg
     case accel
     case gyro

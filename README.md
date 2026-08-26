@@ -168,7 +168,12 @@ each step.
 
 `raw.csv` — one row per sample, streamed as it arrives (not buffered then
 written, so a crash mid-recording only loses the last unflushed sample, not
-the whole file):
+the whole file). This is both the checklist's "raw PPG data" (the untouched
+`value` column — 19-bit ADC counts / offset-encoded IMU, byte-for-byte off
+the wire) and its "processed PPG data" (`chip`/`stream`/`tag`/`slotIdx`
+decoded from the wire's bare integers into identified, labeled channels) —
+one file serves both, nothing is thrown away between the two. "Relevant
+calculated metrics" (HR/SpO2) live separately in `metadata.json`, below.
 
 | Column | Meaning |
 |---|---|
@@ -181,11 +186,17 @@ the whole file):
 
 `metadata.json` — `participantID`, `sessionID`, `startTime`/`endTime` (Unix
 epoch seconds — matches `raw.csv`'s convention, *not* `JSONEncoder`'s
-default of seconds-since-2001), `measuredSampleRate` (actual observed rate,
-not the 25 SPS spec), `finalHeartRateBPM`/`finalSpo2Percent` (last computed
-values at stop time, `null` if never enough data to compute). Written twice
-— once at `start()` with `endTime: null` for crash safety, again at
-`close()` with final values.
+default of seconds-since-2001), `measuredSampleRate` (all streams combined,
+actual observed rate, not the 25 SPS spec), `measuredPPGSampleRate` /
+`measuredAccelSampleRate` (same, broken out per stream so each can be
+checked against its own spec independently), `acquisitionSettings` (fixed
+hardware configuration this session was recorded under — ADC range,
+integration time, LED currents, accel range/ODR — copied from the Key
+Configuration table above so a session is self-describing without
+cross-referencing the README), `finalHeartRateBPM`/`finalSpo2Percent` (last
+computed values at stop time, `null` if never enough data to compute).
+Written twice — once at `start()` with `endTime: null` for crash safety,
+again at `close()` with final values.
 
 **Tunable thresholds** (all in `BluetoothManager.swift` unless noted):
 HR normal range 50–110 BPM, SpO2 normal ≥95%, motion-detected deviation from

@@ -10,6 +10,7 @@ class SessionRecorder {
     private var fileHandle: FileHandle?
     private var metadata: SessionMetadata
     private var sampleCount = 0
+    private var sampleCountsByStream: [StreamType: Int] = [:]
 
     init(participantID: String, sessionID: String) {
         let formatter = DateFormatter()
@@ -27,6 +28,9 @@ class SessionRecorder {
             startTime: startTime,
             endTime: nil,
             measuredSampleRate: nil,
+            measuredPPGSampleRate: nil,
+            measuredAccelSampleRate: nil,
+            acquisitionSettings: .current,
             finalHeartRateBPM: nil,
             finalSpo2Percent: nil
         )
@@ -48,6 +52,7 @@ class SessionRecorder {
     func append(_ sample: ParsedSample) {
         guard let fileHandle else { return }
         sampleCount += 1
+        sampleCountsByStream[sample.stream, default: 0] += 1
         let line = "\(sample.receivedAt.timeIntervalSince1970),\(sample.chip),\(sample.stream),\(sample.tag),\(sample.value),\(sample.slotIdx)\n"
         do {
             try fileHandle.write(contentsOf: line.data(using: .utf8)!)
@@ -61,6 +66,8 @@ class SessionRecorder {
         let elapsed = endTime.timeIntervalSince(metadata.startTime)
         metadata.endTime = endTime
         metadata.measuredSampleRate = elapsed > 0 ? Double(sampleCount) / elapsed : 0
+        metadata.measuredPPGSampleRate = elapsed > 0 ? Double(sampleCountsByStream[.ppg, default: 0]) / elapsed : 0
+        metadata.measuredAccelSampleRate = elapsed > 0 ? Double(sampleCountsByStream[.accel, default: 0]) / elapsed : 0
         metadata.finalHeartRateBPM = finalHeartRateBPM
         metadata.finalSpo2Percent = finalSpo2Percent
 
