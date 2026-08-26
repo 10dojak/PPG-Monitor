@@ -405,7 +405,7 @@ body {
 <div class="panel" id="panel-accel">
   <div class="chart-card" style="margin-bottom:16px;">
     <h2>Acceleration — LSM6DSOTR</h2>
-    <p>±2g @ 26 Hz accel on 200..202 · gyro on 210..212 · wake-up event on 220</p>
+    <p>±2g @ 26 Hz accel on 200..202 · gyro on 210..212</p>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;">
       <div class="chip-cell">
         <div class="chip-cell-label">X axis</div>
@@ -616,9 +616,8 @@ function makeSessionId(date) {
 
 // Classify a packet based on its tag and slot index
 function classifyPacket(tag, slotIdx) {
-  if (slotIdx >= 200 && slotIdx <= 202) return 'imu_accel';// firmware sends accel on 200..202, gyro on 210..212, wakeup on 220
+  if (slotIdx >= 200 && slotIdx <= 202) return 'imu_accel';// firmware sends accel on 200..202
   if (slotIdx >= 210 && slotIdx <= 212) return 'imu_gyro';// firmware sends gyro on 210..212
-  if (slotIdx === 220) return 'imu_wakeup';// firmware sends wakeup event on 220
   if (slotIdx >= 128) return 'u2';// U2 slots are 128-139; the imu checks must come first because U2 slots are also >= 128
   return 'u10';// U10 slots are 0-11
 }
@@ -1027,14 +1026,15 @@ function processMaybeLine(line) {
     return;
   }
 
-  // Wake-up packets are event notifications rather than continuous traces.
-  // value bitfield: bit0=X, bit1=Y, bit2=Z. Accept them so firmware wake-up
-  // support does not show up as parser errors before a dedicated UI is added.
+  // Wake-up packet handling is commented out for now while we test the rest of
+  // the IMU stream in isolation.
+  /*
   if (!isNaN(slotIdx) && slotIdx === 220) {
     if (isNaN(tag) || isNaN(val) || tag !== 0) { cntErr++; return; }
     recordPacket({ timestampMs, stream: classifyPacket(tag, slotIdx), tag, value: val, slotIdx, line });
     return;
   }
+  */
 
   // PPG packets use MAX86141 FIFO tags 1..12.
   if (isNaN(tag) || isNaN(val) || tag < 1 || tag > 12) { cntErr++; return; }

@@ -50,12 +50,15 @@
 #include <string.h>
 
 #include <zephyr/logging/log.h>
+#include <zephyr/drivers/i2c.h>
 
 #include "lsmd.h"
 #include "max86140_spi.h"
 
 #define LOG_MODULE_NAME peripheral_uart
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
+
+#define LSM6DSO_WHO_AM_I_REG 0x0F// The WHO_AM_I register is a read-only register that contains a fixed value that identifies the device. For the LSM6DSO IMU, the expected value is 0x6C. This register is used to verify that the device is present and responding correctly over I2C.
 
 #define STACKSIZE CONFIG_BT_NUS_THREAD_STACK_SIZE
 #define PRIORITY 7
@@ -134,7 +137,12 @@ static void al_transmit_gyro(int32_t gyro_mrad_s, uint8_t slot_idx)
 
 /* Transmit a wake-up event from the IMU.
  * slot_idx 220 identifies the wake-up channel, and the value is a 3-bit mask:
- * bit0=X, bit1=Y, bit2=Z. */
+ * bit0=X, bit1=Y, bit2=Z.
+ *
+ * This helper is commented out for now while we validate the baseline
+ * accel/gyro stream without the extra event path in play.
+ */
+/*
 static void al_transmit_wakeup(uint8_t axis_mask)
 {
 	struct uart_data_t *buf = k_malloc(sizeof(*buf));
@@ -148,6 +156,7 @@ static void al_transmit_wakeup(uint8_t axis_mask)
 		}
 	}
 }
+*/
 
 
 static const struct bt_data ad[] = {
@@ -703,6 +712,58 @@ void al_transmit_data(uint32_t data, uint8_t fifo_count){
 	}
 }
 
+// debugging imu 
+static void debug_imu_i2c(void)
+{
+	// create an I2C device instance for the LSM6DSO IMU
+    const struct device *i2c_dev =
+        DEVICE_DT_GET(DT_NODELABEL(i2c0));
+	
+    uint8_t whoami = 0;// variable to hold the WHO_AM_I register value
+    int err;
+
+	// check if the I2C device is ready
+    if (!device_is_ready(i2c_dev)) {
+        LOG_ERR("I2C0 controller itself is not ready");
+        return;
+    }
+
+    LOG_INF("I2C0 controller ready");
+
+    /* Try address 0x6A */
+	// read the WHO_AM_I register from the IMU at address 0x6A
+	// this is the default I2C address for the LSM6DSO IMU when SA0 pin is low
+	// we do this to verify that the IMU is responding correctly over I2C
+    err = i2c_reg_read_byte(
+        i2c_dev,
+        0x6A,
+        LSM6DSO_WHO_AM_I_REG,
+        &whoami
+    );
+
+    if (err == 0) {
+        LOG_INF("Device found at 0x6A, WHO_AM_I = 0x%02X", whoami);
+    } else {
+        LOG_ERR("No response at 0x6A (err %d)", err);
+    }
+
+    /* Try address 0x6B */
+    whoami = 0;
+
+    err = i2c_reg_read_byte(
+        i2c_dev,
+        0x6B,
+        LSM6DSO_WHO_AM_I_REG,
+        &whoami
+    );
+
+    if (err == 0) {
+        LOG_INF("Device found at 0x6B, WHO_AM_I = 0x%02X", whoami);
+    } else {
+        LOG_ERR("No response at 0x6B (err %d)", err);
+    }
+}
+
 int main(void)
 {
 	int err = 0;
@@ -746,8 +807,13 @@ int main(void)
 	static const struct gpio_dt_spec mcp = GPIO_DT_SPEC_GET(DT_NODELABEL(mcp_en), gpios);
 	gpio_pin_configure_dt(&tps, GPIO_OUTPUT_HIGH);
 	gpio_pin_configure_dt(&mcp, GPIO_OUTPUT_HIGH);
-	k_sleep(K_MSEC(50));
+	k_sleep(K_MSEC(100));
 	LOG_INF("Power rails enabled");
+
+	/* TEMPORARY: Test whether the MCU can actually communicate
+	* with the IMU over I2C.
+	*/
+	debug_imu_i2c();
 
 	/* updated by kelvin: 2026-07-14
 	 * 1. LSM6DSOTR IMU initialisation(previous initialisation was her in main.c but now moved to lsmd.c)
@@ -832,7 +898,6 @@ int main(void)
 				struct lsmd_accel_cm_s2 accel_cm;
 				struct lsmd_gyro_sample gyro_raw;
 				struct lsmd_gyro_mrad_s gyro_mrad;
-				struct lsmd_wakeup_event wake_evt;
 				int rc = lsmd_read_accel_gyro(&accel_raw, &gyro_raw);
 
 				if (rc == 0) {
@@ -861,21 +926,23 @@ int main(void)
 					LOG_WRN("IMU fetch failed (err %d)", rc);
 				}
 
-				/* Poll the IMU wake-up source after fetching accel/gyro so a motion
-				 * burst can be logged and forwarded without a separate interrupt path. */
-				rc = lsmd_poll_wakeup_event(&wake_evt);
-				if (rc == 0 && wake_evt.active) {
-					uint8_t axis_mask = (wake_evt.x ? BIT(0) : 0U) |
-							 (wake_evt.y ? BIT(1) : 0U) |
-							 (wake_evt.z ? BIT(2) : 0U);
-					LOG_INF("IMU wake-up detected (x=%u y=%u z=%u)",
-						wake_evt.x, wake_evt.y, wake_evt.z);
-					if (current_conn != NULL) {
-						al_transmit_wakeup(axis_mask);
-					}
-				} else if (rc != 0) {
-					LOG_WRN("IMU wake-up poll failed (err %d)", rc);
-				}
+				/* Wake-up polling is commented out for now so we can validate the
+				 * baseline accel/gyro stream without the event path in play.
+				 *
+				 * rc = lsmd_poll_wakeup_event(&wake_evt);
+				 * if (rc == 0 && wake_evt.active) {
+				 * 	uint8_t axis_mask = (wake_evt.x ? BIT(0) : 0U) |
+				 * 			 (wake_evt.y ? BIT(1) : 0U) |
+				 * 			 (wake_evt.z ? BIT(2) : 0U);
+				 * 	LOG_INF("IMU wake-up detected (x=%u y=%u z=%u)",
+				 * 		wake_evt.x, wake_evt.y, wake_evt.z);
+				 * 	if (current_conn != NULL) {
+				 * 		al_transmit_wakeup(axis_mask);
+				 * 	}
+				 * } else if (rc != 0) {
+				 * 	LOG_WRN("IMU wake-up poll failed (err %d)", rc);
+				 * }
+				 */
 			}
 
 		if (current_conn != NULL) {

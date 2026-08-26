@@ -35,10 +35,9 @@ struct lsmd_gyro_mrad_s {
 	int32_t z;
 };
 
-/* this struct stores information about a wake-up event detected by the LSM6DSOTR IMU. 
- * It contains a boolean flag indicating whether a wake-up event is currently active, 
- * as well as three boolean flags indicating which axes (X, Y, Z) triggered the wake-up event. 
- * This struct is used to communicate wake-up events from the IMU to the application layer. */
+/* this struct stores information about a wake-up event detected by the LSM6DSOTR IMU.
+ * It is kept here for future use, but the wake-up path is currently commented out
+ * so accel/gyro can be tested in isolation. */
 struct lsmd_wakeup_event {
 	bool active;
 	bool x;
@@ -59,6 +58,8 @@ int lsmd_read_gyro(struct lsmd_gyro_sample *sample);
 int lsmd_read_gyro_mrad_s(struct lsmd_gyro_mrad_s *sample);
 void lsmd_gyro_to_mrad_s(const struct lsmd_gyro_sample *raw,
 			 struct lsmd_gyro_mrad_s *sample);
-int lsmd_poll_wakeup_event(struct lsmd_wakeup_event *event);
+/* Wake-up polling is disabled for now while we test accel/gyro only.
+ * int lsmd_poll_wakeup_event(struct lsmd_wakeup_event *event);
+ */
 
 #endif /* LSMD_H_ */
