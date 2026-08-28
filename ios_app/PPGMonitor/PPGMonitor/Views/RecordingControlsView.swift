@@ -4,10 +4,10 @@
 //
 //  "Session Recorder" bar, ported from ppg_monitor.html's .recorder-bar —
 //  same status text logic (packet count while recording / last-saved
-//  summary / idle), same Start/Stop semantics, and Download CSV/Download
-//  JSON buttons — a ShareLink is the iOS-native stand-in for the HTML's
-//  browser download, per PLANNING.md's "Export = share sheet" call, but
-//  kept as two separate buttons to match the HTML layout exactly.
+//  summary / idle), same Start/Stop semantics. Export is a single ShareLink
+//  (the iOS-native stand-in for the HTML's browser download, per
+//  PLANNING.md's "Export = share sheet" call) on the one unified
+//  session.csv — no separate JSON/wide files to keep track of.
 //
 
 import SwiftUI
@@ -18,13 +18,12 @@ struct RecordingControlsView: View {
     @State private var elapsedSeconds: Int = 0
     @State private var timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    // Populated by refreshShareURLs(), not computed inline in `body` — this
+    // Populated by refreshShareURL(), not computed inline in `body` — this
     // view also observes `bt`, whose @Published properties change many
-    // times a second while data is streaming, and copying files on every
+    // times a second while data is streaming, and copying the file on every
     // single re-render would be wasteful I/O. Only recomputed when
     // lastSessionFolder actually changes (i.e., once per stopRecording()).
     @State private var csvShareURL: URL?
-    @State private var jsonShareURL: URL?
 
     private var elapsedText: String {
         let minutes = elapsedSeconds / 60
@@ -45,33 +44,30 @@ struct RecordingControlsView: View {
         return "Not recording · no saved sessions yet"
     }
 
-    // Copies raw.csv/metadata.json to temp files named after the session
-    // folder (e.g. "phoebeTest_abc123_20260825-120000.csv") instead of
-    // sharing the on-disk "raw.csv"/"metadata.json" directly — participant
-    // ID, session ID, and timestamp only otherwise live in the folder name,
-    // which doesn't travel with a share. A generically-named "raw.csv"
-    // AirDropped or saved to Files would silently lose all of that context
-    // (§8: "participant/session information is included").
-    private func refreshShareURLs(for folder: URL?) {
+    // Copies session.csv to a temp file named after the session folder
+    // (e.g. "phoebeTest_abc123_20260825-120000.csv") instead of sharing the
+    // on-disk "session.csv" directly — a generically-named file AirDropped
+    // or saved to Files would lose the participant/session context that
+    // only otherwise lives in the folder name (§8: "participant/session
+    // information is included"). The CSV's own comment header carries the
+    // same info too, so it survives even a rename.
+    private func refreshShareURL(for folder: URL?) {
         guard let folder else {
             csvShareURL = nil
-            jsonShareURL = nil
             return
         }
-        let base = folder.lastPathComponent
-        csvShareURL = copyForSharing(folder.appendingPathComponent("raw.csv"), as: "\(base).csv")
-        jsonShareURL = copyForSharing(folder.appendingPathComponent("metadata.json"), as: "\(base).json")
-    }
-
-    private func copyForSharing(_ source: URL, as filename: String) -> URL? {
-        guard FileManager.default.fileExists(atPath: source.path) else { return nil }
-        let dest = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        let source = folder.appendingPathComponent("session.csv")
+        guard FileManager.default.fileExists(atPath: source.path) else {
+            csvShareURL = nil
+            return
+        }
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("\(folder.lastPathComponent).csv")
         try? FileManager.default.removeItem(at: dest)
         do {
             try FileManager.default.copyItem(at: source, to: dest)
-            return dest
+            csvShareURL = dest
         } catch {
-            return nil
+            csvShareURL = nil
         }
     }
 
@@ -128,17 +124,6 @@ struct RecordingControlsView: View {
                         .foregroundColor(.secondary)
                         .opacity(0.4)
                 }
-
-                if let jsonShareURL {
-                    ShareLink(item: jsonShareURL) {
-                        Label("Download JSON", systemImage: "square.and.arrow.up")
-                    }
-                    .buttonStyle(.bordered)
-                } else {
-                    Label("Download JSON", systemImage: "square.and.arrow.up")
-                        .foregroundColor(.secondary)
-                        .opacity(0.4)
-                }
             }
             .font(.subheadline)
         }
@@ -151,10 +136,10 @@ struct RecordingControlsView: View {
             elapsedSeconds = Int(Date().timeIntervalSince(start))
         }
         .onAppear {
-            refreshShareURLs(for: sessionController.lastSessionFolder)
+            refreshShareURL(for: sessionController.lastSessionFolder)
         }
         .onChange(of: sessionController.lastSessionFolder) { newFolder in
-            refreshShareURLs(for: newFolder)
+            refreshShareURL(for: newFolder)
         }
     }
 }

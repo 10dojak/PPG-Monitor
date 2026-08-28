@@ -398,6 +398,124 @@ hunting for bugs. Found two more real gaps and one non-code item:
   genuinely blocked on the physical iPad + device.
 - Full suite still passing (10 unit tests + UI flow) after this round.
 
+**2026-08-26 (lab session — testing & validation)** — In the lab today to run
+the real-hardware test matrix planned yesterday (§1/§2/§4/§11 items that
+needed the physical iPad + board — repeated BLE connect/disconnect,
+Bluetooth-off handling, long-duration recording, strong/weak signal, motion,
+measured PPG/accel sample rate vs. spec). Results land in this log as they
+come in.
+
+Two new backlog items raised during today's session:
+- **Toggle top panels on/off** — implemented. A "Hide Metrics"/"Show Metrics"
+  disclosure control now sits above `MetricCardsView` in `ContentView`,
+  collapsing the metric-cards row (animated) to free up screen space for the
+  waveform/heatmap/accel views during a live session. Verified by actually
+  running it, not just building: extended `PPGMonitorUITests` to tap
+  `app.buttons["Hide Metrics"]` then `app.buttons["Show Metrics"]` mid-flow —
+  both resolved and tapped successfully in the real running app. Marked the
+  chevron icon `.accessibilityHidden(true)` so the button's accessibility
+  label stays exactly "Hide/Show Metrics" (an SF Symbol otherwise adds its
+  own spoken description, e.g. "chevron up," to the label, which would have
+  broken exact-string lookup in the UI test too).
+- **Wide-format CSV, 24 columns (one per channel)** — implemented, then
+  significantly reworked same day per feedback: the first pass added a
+  *third* file (`raw_wide.csv`) alongside `raw.csv`/`metadata.json`, which
+  was the wrong shape entirely — collapsed to **one file, one export
+  button**. `SessionRecorder` now writes a single `session.csv`:
+  participant/session/settings info lives in a `#`-prefixed comment header
+  (written at `start()`), 28 columns (`timestamp` + 24 PPG channels + accel
+  X/Y/Z, each column self-labeled with its chip/tag/slotIdx right in the
+  header — no separate legend needed), then a `#`-prefixed comment footer
+  (measured rates, HR/SpO2, written at `close()`). `pandas.read_csv(path,
+  comment='#')` skips both comment blocks automatically — no second file, no
+  manual line-skipping.
+  - Timestamp switched from a raw Unix-epoch float to ISO 8601
+    (`2026-08-26T15:00:00.101Z`) — was flagged as confusing to read; both
+    pandas and MATLAB parse it directly, no cleanup lost.
+  - Fixed real duplication, not just the file count: writing one row per
+    incoming sample meant ~27 near-identical rows per actual "reading" (24
+    PPG + 3 accel columns each updating independently). Rows are now batched
+    into ~200ms buckets (matching the firmware's own per-cycle transmit
+    tick) with last-known-value carried forward — one row per real cycle,
+    not per sample. Caught a real ordering bug while building this: a
+    sample's value was being merged into the running state *before* the
+    previous bucket's row got flushed, which would have leaked the new
+    sample's value into the wrong row. Fixed by flushing first, updating
+    state after.
+  - Re-confirmed the gyro/wake-up-bitmask exclusion decision (asked
+    directly: "are we displaying the useful info, like binary and?") — still
+    excluded, same reasoning as before (never in a real capture / not in
+    checklist scope / disabled on `peripheral_uart_test`), now stated
+    explicitly in the README rather than left implicit.
+  - Verified twice, not just via unit tests: compiled `SessionRecorder` +
+    its dependencies standalone (outside the simulator sandbox, real
+    unsandboxed process) and ran a realistic mixed PPG/accel/gyro/wakeup/
+    corrupted-line sequence through it, then loaded the real output file in
+    pandas — confirmed both comment blocks are skipped automatically, dtypes
+    are clean, timestamp parses to a real datetime, and all 20 metadata
+    lines are still recoverable by anyone who wants them.
+  - Tests rewritten for the new format:
+    `sessionCsvCarriesForwardLastKnownValuesAndExcludesGyroWakeup` (replaces
+    the two old fidelity tests — deterministic synthetic timestamps prove
+    the exact carry-forward sequence row-by-row, and that gyro/wakeup add no
+    columns at all) and a rewritten `dataWrittenBeforeUncleanShutdownSurvives`
+    (proves the header block + completed buckets survive a simulated crash,
+    only the one not-yet-flushed bucket is at risk — an explicit, accepted
+    tradeoff, not a silent gap). `RecordingControlsView` now has exactly one
+    "Download CSV" button. Full 10-test suite passing.
+
+**2026-08-27 (lab session — first real-hardware run + UI fixes)** — Built and
+installed on the physical iPad for the first time this session (found the
+right `devicectl` destination ID after some trial and error — differs from
+the one `xcodebuild -destination` lists). Two real bugs found and fixed
+along the way, both verified on-device, not just in Simulator:
+- **Dark panel bug** — `ParticipantEntryView` had no explicit background at
+  all, so it rendered as solid black on a Dark Mode iPad; the rest of the
+  UI is a mix of hardcoded light colors and adaptive system colors, so the
+  overall look was a jarring half-light/half-dark mismatch depending on the
+  device's Appearance setting. Since the whole UI is a fixed-palette port of
+  `ppg_monitor.html` and was never designed with dark mode in mind, fixed by
+  locking the app to light mode app-wide (`.preferredColorScheme(.light)` in
+  `PPGMonitorApp.swift`) rather than patching individual view backgrounds.
+- **Metric-cards toggle** — added a "Hide Metrics"/"Show Metrics" control
+  above `MetricCardsView` to free up screen space for the live views during
+  a session. Verified by actually tapping it via `PPGMonitorUITests`, not
+  just building — also caught and fixed an accessibility-label bug in the
+  process (an un-hidden SF Symbol was appending its own spoken description
+  to the button's label, which would have broken both VoiceOver and the
+  exact-string UI-test lookup).
+
+**First real BLE connection — diagnosed, not yet fixed:** app connects to
+`PPG_DK_2026A` successfully (status, discovery, connect all work as
+designed), but signal quality reads "No Signal" — `0` U10 packets, `0` U2
+packets, and a parse-error count climbing in real time (166 → 173 across a
+few seconds). So data *is* arriving over BLE, but 100% of it fails to parse.
+Traced this into the actual `peripheral_uart_test` firmware source (not just
+guessed): both the real PPG transmit path (`al_transmit_data()`) and a
+generic UART→BLE bridge thread funnel through the same queue
+(`fifo_uart_rx_data`) before hitting `bt_nus_send()` (`main.c:973–991`).
+That branch also added new IMU I2C debug logging (`debug_imu_i2c()`,
+`WHO_AM_I` probing on `0x6A`/`0x6B`) — if that log output shares the same
+serial path, it would interleave with real PPG lines and corrupt the
+framing, which would produce exactly this symptom (real connection, 100%
+and climbing parse-error rate, zero valid samples). This is a firmware-side
+issue, not an app bug — the app is correctly rejecting the malformed lines
+instead of crashing or showing garbage, which is the intended behavior.
+
+**Next session (picking back up on firmware):** isolate/disable the new
+debug logging on `peripheral_uart_test` and confirm parse errors clear;
+once real packets are flowing, run the full hardware test matrix from
+yesterday's plan (repeated connect/disconnect, Bluetooth-off handling,
+strong/weak signal, motion, long-duration recording) that's been blocked on
+this the whole time. Everything on the software side is otherwise
+demonstrated and stable — this firmware fix is the one thing standing
+between here and full checklist validation.
+
+Also rebuilt `PPG_Monitor_Progress.pptx` as a stakeholder-facing version
+(plain-language, no commit hashes/function names) and drafted a cover email
+to the professor, cc'ing Rutendo — covering what's fixed, in progress, and
+next. Not yet confirmed sent.
+
 ## 1. Device Connection & Bluetooth
 - [ ] App provides a clear error message when the device cannot be found
 - [ ] Connection remains stable during a full data-collection session

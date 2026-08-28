@@ -45,6 +45,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showExitDuringRecordingWarning = false
     @State private var showSettings = false
+    @State private var showMetricCards = true
 
     // Background color matches ppg_monitor.html's body { background: #dce8f5 }
     private let pageBackground = Color(hex: "#dce8f5")
@@ -84,7 +85,25 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        MetricCardsView(bt: bt)
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showMetricCards.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(showMetricCards ? "Hide Metrics" : "Show Metrics")
+                                Image(systemName: showMetricCards ? "chevron.up" : "chevron.down")
+                                    .accessibilityHidden(true)
+                            }
+                            .font(.caption.weight(.medium))
+                            .foregroundColor(.secondary)
+                        }
+
+                        if showMetricCards {
+                            MetricCardsView(bt: bt)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+
                         PillTabBar(selected: $selectedTab)
 
                         switch selectedTab {

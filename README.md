@@ -166,44 +166,76 @@ each step.
 
 **Exported data format** (`Documents/Sessions/{participantID}_{sessionID}_{timestamp}/`):
 
-`raw.csv` — one row per sample, streamed as it arrives (not buffered then
-written, so a crash mid-recording only loses the last unflushed sample, not
-the whole file). This is both the checklist's "raw PPG data" (the untouched
-`value` column — 19-bit ADC counts / offset-encoded IMU, byte-for-byte off
-the wire) and its "processed PPG data" (`chip`/`stream`/`tag`/`slotIdx`
-decoded from the wire's bare integers into identified, labeled channels) —
-one file serves both, nothing is thrown away between the two. "Relevant
-calculated metrics" (HR/SpO2) live separately in `metadata.json`, below.
+A single file, **`session.csv`** — no separate JSON, no separate "wide"
+variant. One export button, one file to keep track of.
 
-| Column | Meaning |
-|---|---|
-| `timestamp` | Unix epoch seconds (`Double`) — wall-clock receive time, not on-device sample time (the wire format has no on-device timestamp) |
-| `chip` | `u10` / `u2` / `imu` |
-| `stream` | `ppg` / `accel` / `gyro` / `wakeup` |
-| `tag` | MAX86141 FIFO tag (1–12), or `0` for all IMU streams |
-| `value` | Raw wire value — 19-bit ADC count for PPG, offset-encoded for IMU (see `README`'s BLE Data Format section above) |
-| `slotIdx` | 0–11 = U10, 128–139 = U2, 200–202 = accel X/Y/Z, 210–212 = gyro X/Y/Z, 220 = wake-up |
+**Layout:** a `#`-prefixed comment block (participant/session identity +
+fixed acquisition settings, written at `start()`), a normal CSV header row
+naming every column, data rows, then a second `#`-prefixed comment block
+(end-of-recording stats, appended at `close()`). Both comment blocks are
+skipped automatically by `pandas.read_csv(path, comment='#')` — no manual
+line-skipping or a second file to open — while still being plain text anyone
+can read by eye:
 
-`metadata.json` — `participantID`, `sessionID`, `startTime`/`endTime` (Unix
-epoch seconds — matches `raw.csv`'s convention, *not* `JSONEncoder`'s
-default of seconds-since-2001), `measuredSampleRate` (all streams combined,
-actual observed rate, not the 25 SPS spec), `measuredPPGSampleRate` /
-`measuredAccelSampleRate` (same, broken out per stream so each can be
-checked against its own spec independently), `acquisitionSettings` (fixed
-hardware configuration this session was recorded under — ADC range,
-integration time, LED currents, accel range/ODR — copied from the Key
-Configuration table above so a session is self-describing without
-cross-referencing the README), `finalHeartRateBPM`/`finalSpo2Percent` (last
-computed values at stop time, `null` if never enough data to compute).
-Written twice — once at `start()` with `endTime: null` for crash safety,
-again at `close()` with final values.
+```
+# PPG Monitor session export
+# participantID: phoebeTest
+# sessionID: abc123
+# startTime: 2026-08-26T15:00:00.000Z
+# nominalPPGSampleRateHz: 25.0
+# adcRangeNanoamps: 8192.0
+# ... (full Key Configuration table, see below)
+# accelEncoding: raw = (acceleration_m/s^2 * 100) + 20000 -- decode with (raw - 20000) / 100
+# rowCadenceSeconds: 0.2 -- one row per ~200ms cycle; each column carries forward its last known value until it next updates
+# columns: timestamp (ISO 8601, wall-clock receive time -- the wire format has no on-device timestamp), then the 24 PPG channels [chip tagN], then Accel X/Y/Z [imu slotIdx]
+timestamp,IR·LED1 PD1 [u10 tag3],IR·LED1 PD2 [u10 tag9],...,Accel X [imu 200],Accel Y [imu 201],Accel Z [imu 202]
+2026-08-26T15:00:00.101Z,481,512,...,20050,19980,20010
+...
+# endTime: 2026-08-26T15:05:00.000Z
+# measuredPPGSampleRateHz: 24.6
+# measuredAccelSampleRateHz: 25.1
+# finalHeartRateBPM: 72
+# finalSpo2Percent: 98
+```
+
+**28 columns, self-labeled:** `timestamp` + the 24 PPG channels + `Accel
+X/Y/Z`. Every PPG column name carries its own chip/tag right in the header
+(`IR·LED1 PD1 [u10 tag3]`) — no separate legend to cross-reference to know
+which column is which channel. `timestamp` is ISO 8601 (e.g.
+`2026-08-26T15:00:00.101Z`), not a raw Unix epoch number — reads
+unambiguously by eye, and both pandas and MATLAB parse it directly.
+
+**What's *not* in this file, on purpose:**
+- **Gyro** — defined in the wire protocol, but the checklist's §4 asks for
+  accelerometer only, and gyro has never appeared in any real capture.
+- **The wake-up event bitmask** (`slotIdx` 220, bit0/1/2 = X/Y/Z motion
+  triggered) — this is a firmware motion-interrupt flag, not a scientific
+  measurement someone would analyze in Python/MATLAB. It's also currently
+  disabled on the `peripheral_uart_test` firmware branch. If a "was there
+  motion" column is ever wanted, deriving one from the accelerometer signal
+  (the app already computes a motion threshold for the live "Still" badge)
+  is more meaningful than exposing a raw hardware interrupt bit.
+
+Both are easy to add as extra columns later if that changes — the row-write
+logic already branches on `sample.stream`, see `SessionRecorder.append(_:)`.
+
+**Row cadence, and why there's no near-duplicate row per sample:** the 24
+PPG channels + 3 accel channels each update on their own independent
+schedule (not all at once), so naively writing one row per incoming sample
+would mean ~27 largely-identical rows for every real "reading." Instead,
+samples are batched into ~200ms buckets — matching the firmware's own
+per-cycle transmit tick — and one row is flushed per bucket, carrying
+forward each column's last-known value. A crash mid-recording can only ever
+lose the one bucket that hadn't been flushed yet when it happened; everything
+before that is already durable on disk.
 
 **Tunable thresholds** (all in `BluetoothManager.swift` unless noted):
 HR normal range 50–110 BPM, SpO2 normal ≥95%, motion-detected deviation from
 1g >0.5 m/s² (`AccelView.swift`), signal quality Good/Fair/Poor error-rate
 cutoffs at 2%/10% (`signalQuality`), heatmap color intensity max value
 `HEAT_MAX`-equivalent 300,000 (`Models/PPGDataset.swift`), BLE scan timeout
-15s (`BLEDataSource.swift`).
+15s (`BLEDataSource.swift`), `session.csv` row-batching interval 0.2s
+(`rowIntervalSeconds`, `SessionRecorder.swift`).
 
 ---
 

@@ -57,6 +57,14 @@ final class PPGMonitorUITests: XCTestCase {
 
         snap("03-recording-screen-ready")
 
+        app.buttons["Hide Metrics"].tap()
+        sleep(1)
+        snap("03b-metrics-hidden")
+
+        app.buttons["Show Metrics"].tap()
+        sleep(1)
+        snap("03c-metrics-shown-again")
+
         app.buttons["Start Recording"].tap()
         sleep(3)
 

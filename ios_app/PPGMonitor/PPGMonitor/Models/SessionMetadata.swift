@@ -8,7 +8,7 @@ import Foundation
 // Fixed hardware configuration (README's "Key Configuration" table + IMU
 // spec) — not user-adjustable from the app, recorded per-session so a
 // recording is self-describing without cross-referencing the README.
-struct AcquisitionSettings: Codable {
+struct AcquisitionSettings {
     let nominalPPGSampleRateHz: Double
     let adcRangeNanoamps: Double
     let integrationTimeMicroseconds: Double
@@ -28,17 +28,4 @@ struct AcquisitionSettings: Codable {
         accelRangeG: 2,
         accelNominalODRHz: 26
     )
-}
-
-struct SessionMetadata: Codable {
-    let participantID: String
-    let sessionID: String
-    let startTime: Date
-    var endTime: Date?
-    var measuredSampleRate: Double?        // all streams (ppg+accel+gyro+wakeup) combined
-    var measuredPPGSampleRate: Double?
-    var measuredAccelSampleRate: Double?
-    let acquisitionSettings: AcquisitionSettings
-    var finalHeartRateBPM: Int?
-    var finalSpo2Percent: Int?
 }
