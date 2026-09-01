@@ -141,13 +141,32 @@ struct PPGMonitorTests {
 
     @Test func parseLineRejectsCorruptedPackets() {
         #expect(parseLine("") == nil)
-        #expect(parseLine("3 481") == nil)              // missing slotIdx
-        #expect(parseLine("3 481 3 extra") == nil)      // extra token
-        #expect(parseLine("abc 481 3") == nil)           // non-numeric tag
+        #expect(parseLine("5") == nil)                    // single token
+        #expect(parseLine("0 3") == nil)                  // 2 tokens but tag 0 isn't a PPG tag
+        #expect(parseLine("abc 481 3") == nil)            // non-numeric tag
         #expect(parseLine("3 xyz 3") == nil)              // non-numeric value
-        #expect(parseLine("3 481 abc") == nil)            // non-numeric slotIdx
-        #expect(parseLine("3 481 999") == nil)            // slotIdx out of every known range
-        #expect(parseLine("3 481 -1") == nil)             // negative slotIdx
+        #expect(parseLine("3 481 abc") == nil)            // slotIdx present but non-numeric → garbled
+        #expect(parseLine("3 481 999") == nil)            // explicit slotIdx out of every known range
+        #expect(parseLine("3 481 -1") == nil)             // explicit negative slotIdx
+    }
+
+    // ppg_monitor.html's parser accepts a bare "tag value" pair and ignores
+    // junk after a valid triplet; being stricter than that caused a
+    // 100%-parse-error run on real hardware, so the port matches it here.
+    @Test func parseLineMatchesHtmlTolerance() {
+        let bare = parseLine("3 481")                     // no slotIdx on the wire
+        #expect(bare?.chip == .u10)
+        #expect(bare?.stream == .ppg)
+        #expect(bare?.tag == 3)
+        #expect(bare?.value == 481)
+        #expect(bare?.slotIdx == slotIdxAbsent)
+
+        let trailingJunk = parseLine("3 481 3 extra tokens")
+        #expect(trailingJunk?.chip == .u10)
+        #expect(trailingJunk?.slotIdx == 3)
+
+        #expect(parseLine("9\t66234\t137")?.chip == .u2)  // tab-separated, like /\s+/
+        #expect(parseLine("  3   481   3  ")?.tag == 3)   // padded / multi-space
     }
 
     // MARK: - §10: "existing recorded data are protected if an error occurs"

@@ -16,6 +16,7 @@ final class BLEDataSource: NSObject, PPGDataSource {
     private var centralManager: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var scanTimeoutTimer: Timer?
+    private var notifCount = 0   // diagnostics: count of raw BLE notifications received
 
     // Set by stop(), so didDisconnectPeripheral can tell "user tapped
     // Disconnect" apart from "device dropped unexpectedly" — without this,
@@ -37,7 +38,13 @@ final class BLEDataSource: NSObject, PPGDataSource {
         userInitiatedDisconnect = false
         guard centralManager.state == .poweredOn else { return }
         onStatusChange?(false, "Scanning...")
-        centralManager.scanForPeripherals(withServices: [NUS_SERVICE_UUID])
+        // Scan unfiltered and match by name. The firmware advertises the NUS
+        // 128-bit UUID in the *scan response* (sd[]), not the primary
+        // advertising payload (ad[]) — a `withServices:` filter can miss it
+        // on iOS, which would look exactly like "device not found."
+        print("[rawstream] scan start (unfiltered, matching name \(DEVICE_NAME))")
+        centralManager.scanForPeripherals(withServices: nil,
+                                          options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
 
         scanTimeoutTimer?.invalidate()
         scanTimeoutTimer = Timer.scheduledTimer(withTimeInterval: scanTimeoutSeconds, repeats: false) { [weak self] _ in
@@ -60,7 +67,15 @@ final class BLEDataSource: NSObject, PPGDataSource {
     private func handleScanTimeout() {
         guard peripheral == nil else { return }   // already found one, timeout is moot
         centralManager.stopScan()
-        onStatusChange?(false, "Device not found — check PPG_DK_2026A is powered on and in range")
+        onStatusChange?(false, "Device not found — retrying…")
+        print("[rawstream] scan timeout — retrying in 3s")
+        // Keep retrying instead of giving up: after the app is killed and
+        // relaunched, the board can hold the stale link for its supervision
+        // timeout (~30s) before it re-advertises.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, self.peripheral == nil, !self.userInitiatedDisconnect else { return }
+            self.start()
+        }
     }
 }
 
@@ -80,11 +95,13 @@ extension BLEDataSource: CBCentralManagerDelegate {
                         didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any],
                         rssi RSSI: NSNumber) {
-        // Filter by device name, not just service UUID — don't connect to
-        // just any peripheral that happens to advertise the NUS service.
-        guard peripheral.name == DEVICE_NAME else { return }
+        let advName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        print("[rawstream] discovered name=\(String(describing: peripheral.name)) advName=\(String(describing: advName)) rssi=\(RSSI) svc=\(String(describing: advertisementData[CBAdvertisementDataServiceUUIDsKey]))")
 
-        print("Found: \(peripheral.name ?? "unknown")")
+        // Match on either the GAP name or the advertised local name.
+        guard peripheral.name == DEVICE_NAME || advName == DEVICE_NAME else { return }
+
+        print("[rawstream] MATCH \(peripheral.name ?? advName ?? "unknown") — connecting")
         self.peripheral = peripheral
         centralManager.stopScan()
         centralManager.connect(peripheral)
@@ -152,14 +169,26 @@ extension BLEDataSource: CBPeripheralDelegate {
             return
         }
         peripheral.setNotifyValue(true, for: txChar)
-        print("Subscribed to NUS TX")
+        print("[rawstream] subscribed to NUS TX \(txChar.uuid); notifying=\(txChar.isNotifying)")
+    }
+
+    func peripheral(_ peripheral: CBPeripheral,
+                    didUpdateNotificationStateFor characteristic: CBCharacteristic,
+                    error: Error?) {
+        print("[rawstream] notifyState uuid=\(characteristic.uuid) isNotifying=\(characteristic.isNotifying) err=\(String(describing: error))")
     }
 
     func peripheral(_ peripheral: CBPeripheral,
                     didUpdateValueFor characteristic: CBCharacteristic,
                     error: Error?) {
-        guard let data = characteristic.value,
-              let text = String(data: data, encoding: .utf8) else { return }
+        notifCount += 1
+        let data = characteristic.value
+        if notifCount <= 400 {
+            let hex = (data ?? Data()).map { String(format: "%02x", $0) }.joined(separator: " ")
+            let utf8 = data.flatMap { String(data: $0, encoding: .utf8) }
+            print("[rawstream] notif #\(notifCount) len=\(data?.count ?? -1) err=\(String(describing: error)) utf8=\(String(reflecting: utf8 ?? "<non-utf8>")) hex=[\(hex)]")
+        }
+        guard let data, let text = String(data: data, encoding: .utf8) else { return }
         onLine?(text)
     }
 }

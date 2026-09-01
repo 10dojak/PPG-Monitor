@@ -26,6 +26,16 @@ struct SettingsView: View {
                 } footer: {
                     Text("Mock data replays a captured PPG session — useful for testing with no hardware. Turn this off to scan for and connect to a real PPG_DK_2026A device over Bluetooth.")
                 }
+
+                Section {
+                    NavigationLink {
+                        RawStreamDebugView(bt: bt)
+                    } label: {
+                        Label("Raw data stream", systemImage: "waveform.and.magnifyingglass")
+                    }
+                } footer: {
+                    Text("Shows the text arriving over Bluetooth verbatim, the parse counters, and any lines that failed to parse — for diagnosing a real-hardware connection.")
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)

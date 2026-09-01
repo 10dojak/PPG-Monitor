@@ -10,3 +10,5 @@ xcuserdata/
 
 # build
 /build*/
+**/build/
+*.xcuserstate

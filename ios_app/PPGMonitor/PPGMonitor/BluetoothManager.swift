@@ -9,6 +9,13 @@
 
 import Foundation
 import Combine
+import os
+
+// Structured logging for real-hardware bring-up. Stream it live with:
+//   log stream --device-name "<iPad name>" \
+//     --predicate 'subsystem == "com.tsaichenlo.PPGMonitor"' --style compact
+// Pairs with RawStreamDebugView (same data, on-device).
+private let rawLog = Logger(subsystem: "com.tsaichenlo.PPGMonitor", category: "rawstream")
 
 // Channel keys: U10 tags key display buffers directly by tag (1-12); U2 tags
 // are offset by u2ChannelKeyOffset (see PPGDataset.swift); IMU data
@@ -77,6 +84,43 @@ class BluetoothManager: ObservableObject {
     private var lineBuffer = ""              // accumulates partial lines
     private let maxPoints  = 200             // rolling window size
 
+    // MARK: - Raw-stream diagnostics (real-hardware bring-up)
+    //
+    // A verbatim record of what actually comes off the wire, so a parse-error
+    // run on real hardware can be diagnosed on the iPad itself instead of
+    // guessing at a laptop. Deliberately NOT @Published and NOT touched by the
+    // charts/recorder — the debug view polls rawStreamSnapshot() on its own
+    // timer, so this adds zero SwiftUI invalidations to the hot receive path.
+    private var rawCapture: [String] = []        // every line received, capped
+    private var parseFailures: [String] = []     // lines parseLine rejected, capped
+    private let rawCaptureCap = 40_000
+    private let parseFailureCap = 60
+
+    /// The most recent `count` raw lines, oldest first.
+    func rawStreamSnapshot(last count: Int = 200) -> [String] {
+        Array(rawCapture.suffix(count))
+    }
+
+    /// The first lines that failed to parse this session, verbatim.
+    var parseFailureSamples: [String] { parseFailures }
+
+    /// Writes the whole captured stream to a temp file for the share sheet.
+    /// Drop the result into `Mock/sample_session.txt` to replay it through
+    /// `MockReplayDataSource` at a desk.
+    func exportRawCapture() -> URL? {
+        guard !rawCapture.isEmpty else { return nil }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("raw_ble_capture_\(stamp).txt")
+        do {
+            try rawCapture.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
     // Sample-rate bookkeeping
     private var totalPPGSamples = 0
     private var spsLastCount = 0
@@ -121,6 +165,8 @@ class BluetoothManager: ObservableObject {
             self?.receive(line)
         }
         source.onStatusChange = { [weak self] connected, message in
+            rawLog.notice("STATUS connected=\(connected, privacy: .public) msg=\(message, privacy: .public)")
+            print("[rawstream] STATUS connected=\(connected) msg=\(message)")
             DispatchQueue.main.async {
                 self?.isConnected = connected
                 self?.statusMessage = message
@@ -173,6 +219,8 @@ class BluetoothManager: ObservableObject {
         prevIRValue = 0
         prevIRDelta = 0
         lineBuffer = ""
+        rawCapture = []
+        parseFailures = []
         isConnected = false
         statusMessage = "Not connected"
     }
@@ -196,16 +244,38 @@ class BluetoothManager: ObservableObject {
         }
     }
 
+    private var rxChunkCount = 0
+
     private func processReceivedText(_ text: String) {
+        rxChunkCount += 1
+        if rxChunkCount <= 400 {
+            rawLog.notice("RX chunk #\(self.rxChunkCount, privacy: .public) bytes=\(text.utf8.count, privacy: .public) \(String(reflecting: text), privacy: .public)")
+            print("[rawstream] RX chunk #\(rxChunkCount) bytes=\(text.utf8.count) \(String(reflecting: text))")
+        }
+
         lineBuffer += text
         var lines = lineBuffer.components(separatedBy: "\n")
         lineBuffer = lines.removeLast()   // last chunk may be incomplete
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
+
+            // Capture the line as received (only the \n split has happened —
+            // a trailing \r or stray whitespace is still here), so the debug
+            // view shows real framing and the export replays byte-for-byte.
+            rawCapture.append(line)
+            if rawCapture.count > rawCaptureCap { rawCapture.removeFirst(rawCapture.count - rawCaptureCap) }
+
             guard let sample = parseLine(trimmed) else {
                 cntErr += 1
+                if parseFailures.count < parseFailureCap { parseFailures.append(line) }
+                rawLog.error("PARSE-FAIL \(String(reflecting: line), privacy: .public)")
+                print("[rawstream] PARSE-FAIL \(String(reflecting: line))")
                 continue
+            }
+            if cntU10 + cntU2 < 60 {
+                rawLog.notice("PARSED chip=\(String(describing: sample.chip), privacy: .public) tag=\(sample.tag, privacy: .public) val=\(sample.value, privacy: .public) slot=\(sample.slotIdx, privacy: .public)")
+                print("[rawstream] PARSED chip=\(sample.chip) tag=\(sample.tag) val=\(sample.value) slot=\(sample.slotIdx)")
             }
             handle(sample)
         }
