@@ -16,7 +16,7 @@ struct AccelView: View {
     @ObservedObject var bt: BluetoothManager
 
     private func converted(_ key: Int) -> [DataPoint] {
-        (bt.channels[key] ?? []).map { DataPoint(x: $0.x, y: ($0.y - accelOffset) / accelScale) }
+        (bt.channels[key] ?? []).map { DataPoint(x: $0.x, y: ($0.y - accelOffset) / accelScale, t: $0.t) }
     }
 
     private var latestX: Double? { converted(200).last?.y }

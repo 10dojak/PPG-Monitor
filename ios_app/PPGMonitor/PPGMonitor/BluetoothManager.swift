@@ -23,8 +23,11 @@ private let rawLog = Logger(subsystem: "com.tsaichenlo.PPGMonitor", category: "r
 
 struct DataPoint: Identifiable {
     let id   = UUID()
-    let x: Int      // rolling sample index (x-axis)
+    let x: Int      // rolling sample index, kept for reference/debugging
     let y: Double   // ADC count (y-axis)
+    let t: Date     // receive-time (see CLAUDE.md: no on-device timestamp
+                     // exists in the wire format) — this is what the chart's
+                     // rolling time window is built on.
 }
 
 class BluetoothManager: ObservableObject {
@@ -82,7 +85,15 @@ class BluetoothManager: ObservableObject {
     var onParsedSample: ((ParsedSample) -> Void)?
 
     private var lineBuffer = ""              // accumulates partial lines
-    private let maxPoints  = 200             // rolling window size
+
+    // How much history each channel's display buffer keeps, in wall-clock
+    // (receive) time rather than a fixed sample count — channels arrive at
+    // different effective rates (PPG vs. IMU, and actual BLE throughput
+    // varies), so a fixed point count would span a different amount of time
+    // per channel. This is the ceiling on how far back WaveformChartView can
+    // scroll; its own visible window (default 30s, user-adjustable) is
+    // always <= this.
+    static let maxHistorySeconds: TimeInterval = 120
 
     // MARK: - Raw-stream diagnostics (real-hardware bring-up)
     //
@@ -296,11 +307,12 @@ class BluetoothManager: ObservableObject {
         }
 
         let x     = counters[key, default: 0]
-        let point = DataPoint(x: x, y: Double(sample.value))
+        let point = DataPoint(x: x, y: Double(sample.value), t: sample.receivedAt)
 
         var buf = channels[key, default: []]
         buf.append(point)
-        if buf.count > maxPoints { buf.removeFirst(buf.count - maxPoints) }
+        let cutoff = point.t.addingTimeInterval(-Self.maxHistorySeconds)
+        while let first = buf.first, first.t < cutoff { buf.removeFirst() }
 
         channels[key] = buf
         counters[key]  = x + 1
