@@ -357,7 +357,6 @@ static uint8_t _spi_read_u2(uint8_t reg_addr)
 // LED_CONFIG (0x13)
 // NOTE: your original code treated these as separate registers; they are fields in ONE register.
 #define MAX8614X_LED_SETTLING_12US     (0x3 << 6)
-#define MAX8614X_LED_RANGE_124MA       (0x3)
 
 // LED drive current example
 #define MAX8614X_LED_CURRENT_15mA      (0x20)
@@ -390,26 +389,41 @@ void max86140_init(void)
     // -------------------------------
     // PPG Analog Configuration
     // -------------------------------
-    // PPG_CONFIG1: [7]=ALC_DIS(0), [6:4]=PPG_ADC_RGE(001=8192nA), [3:2]=PPG_TINT(10=58.7us), [1:0]=0
-    // Master (U10/PD1): ADC full-scale = 8192 nA per firmware spec
-    max86140_spi_write(MAX8614X_REG_PPG_CONFIG1, 0x18);
+    // PPG_CONFIG1 (0x11) actual field layout, datasheet p.68:
+    //   [7]=ALC_DISABLE  [6]=ADD_OFFSET  [5:4]=PPG2_ADC_RGE  [3:2]=PPG1_ADC_RGE  [1:0]=PPG_TINT
+    //   ADC_RGE: 00=4096nA 01=8192nA 10=16384nA 11=32768nA
+    //   PPG_TINT: 00=14.8us 01=29.4us 10=58.7us 11=117.3us
+    // Master (U10): PD1 and PD2 both 8192 nA, integration 58.7 us.
+    //   0x16 = 0b0_0_01_01_10
+    // Was 0x18, which the old comment mislabelled: that is PD1 at 16384 nA and
+    // only 14.8 us of integration, not the 8192 nA / 58.7 us it claimed.
+    max86140_spi_write(MAX8614X_REG_PPG_CONFIG1, 0x16);
 
     // PPG_CONFIG2: bits[7:3]=PPG_SR(00000=25SPS), bits[2:0]=SMP_AVG(000=1x no averaging)
     // 0x03 was wrong — SMP_AVG=011=8x giving only 3.125 SPS output instead of 25 SPS
     max86140_spi_write(MAX8614X_REG_PPG_CONFIG2, 0x00);
 
-    // LED_CONFIG: combine fields in ONE write (fix)
-    max86140_spi_write(MAX8614X_REG_LED_CONFIG,
-                       (uint8_t)(MAX8614X_LED_SETTLING_12US | MAX8614X_LED_RANGE_124MA));
+    // PPG_CONFIG_3 (0x13): bits[7:6] = LED settling time. Current range is NOT here.
+    max86140_spi_write(MAX8614X_REG_LED_CONFIG, MAX8614X_LED_SETTLING_12US);
+
+    // LED_RANGE1 (0x2A): full-scale current, 2 bits per driver.
+    //   bits[1:0]=LED1, bits[3:2]=LED2, bits[5:4]=LED3;  11 = 124 mA
+    //   0x3F = all three at 124 mA, which is what the LEDx_PA values below assume.
+    max86140_spi_write(MAX8614X_REG_LED_RANGE1, 0x3F);
+    // LED_RANGE2 (0x2B): same for LED4/5/6 - bits[1:0]=LED4 [3:2]=LED5 [5:4]=LED6
+    max86140_spi_write(MAX8614X_REG_LED_RANGE2, 0x3F);
 
     // Photodiode Bias: both PD1 and PD2 active per firmware spec
     // PPG1(PD1)=8192nA, PPG2(PD2)=8192nA — tags 01-03 and 07-09 expected in FIFO
     max86140_spi_write(MAX8614X_REG_PD_BIAS, 0x11); // Bias PD1 + PD2
 
     // LED currents per firmware spec (124/256 * N mA):
-    max86140_spi_write(MAX8614X_REG_LED1_PA, 0x1E); // 14.53 mA (Red,   LED1_DRV = 30)
-    max86140_spi_write(MAX8614X_REG_LED2_PA, 0x3C); // 29.06 mA (IR,    LED2_DRV = 60)
-    max86140_spi_write(MAX8614X_REG_LED3_PA, 0x1E); // 14.53 mA (Green, LED3_DRV = 30)
+    max86140_spi_write(MAX8614X_REG_LED1_PA, 0x1E); // 14.53 mA  Red 655   (1st)
+    max86140_spi_write(MAX8614X_REG_LED2_PA, 0x3C); // 29.06 mA  Green 525 (1st)
+    max86140_spi_write(MAX8614X_REG_LED3_PA, 0x1E); // 14.53 mA  Red 655   (2nd)
+    max86140_spi_write(MAX8614X_REG_LED4_PA, 0x1E); // 14.53 mA  IR 940    (1st)
+    max86140_spi_write(MAX8614X_REG_LED5_PA, 0x1E); // 14.53 mA  IR 940    (2nd)
+    max86140_spi_write(MAX8614X_REG_LED6_PA, 0x3C); // 29.06 mA  Green 525 (2nd)
 
     // -------------------------------
     // FIFO Configuration
@@ -424,32 +438,41 @@ void max86140_init(void)
     // -------------------------------
     // LED Sequence Configuration — 6-slot, 2-bank full scan
     // -------------------------------
-    // Each LEDC nibble: bit3=GPIO2(bank), bits[2:0]=LED driver (1=LED1,2=LED2,3=LED3)
-    // Bank0 (GPIO2=LOW,  bit3=0): mux routes LED driver to Bank0 physical LEDs
-    // Bank1 (GPIO2=HIGH, bit3=1): mux routes LED driver to Bank1 physical LEDs
+    // LEDC codes are a FLAT LOOKUP TABLE (datasheet Table 2), not a bit-field:
+    //   0x0 NONE  0x1 LED1  0x2 LED2  0x3 LED3  0x9 DIRECT AMBIENT
+    //   0xA LED4  0xB LED5  0xC LED6   <- these also assert GPIO2 as mux control
     //
-    // 6-slot sequence (SEQ register nibble: bits[7:4]=even slot, bits[3:0]=odd slot):
-    //   Slot1: LEDC=0x01 → LED1/Bank0  (tag01 PPG1, tag07 PPG2)
-    //   Slot2: LEDC=0x09 → LED1/Bank1  (tag02 PPG1, tag08 PPG2)
-    //   Slot3: LEDC=0x02 → LED2/Bank0  (tag03 PPG1, tag09 PPG2)
-    //   Slot4: LEDC=0x0A → LED2/Bank1  (tag04 PPG1, tag10 PPG2)
-    //   Slot5: LEDC=0x03 → LED3/Bank0  (tag05 PPG1, tag11 PPG2)
-    //   Slot6: LEDC=0x0B → LED3/Bank1  (tag06 PPG1, tag12 PPG2)
+    // U10 uses only 0x1/0x2/0x3, so its GPIO2 stays tristate. That matters because
+    // U10 pin B4 sits on the RTC_CLK net with XTAL1; asserting it fights the oscillator.
+    // The MAX4783 select line is driven by U2's GPIO2 (see max86141_u2_init).
+    //
+    // Slot order groups by mux bank: three high-bank dies, then three low-bank.
+    // The mux moves once per cycle, and this is the order the c0-c23 channel map uses.
+    //   Slot1: 0x1 -> LED1_PA, mux HIGH -> X1 -> J28 -> LED1.4  Red 655   (1st)
+    //   Slot2: 0x2 -> LED2_PA, mux HIGH -> Y1 -> J29 -> LED1.3  Green 525 (1st)
+    //   Slot3: 0x3 -> LED3_PA, mux HIGH -> Z1 -> J31 -> LED4.4  Red 655   (2nd)
+    //   Slot4: 0xA -> LED4_PA, mux LOW  -> X0 -> J27 -> LED1.1  IR 940    (1st)
+    //   Slot5: 0xB -> LED5_PA, mux LOW  -> Y0 -> J30 -> LED4.1  IR 940    (2nd)
+    //   Slot6: 0xC -> LED6_PA, mux LOW  -> Z0 -> J32 -> LED4.3  Green 525 (2nd)
+    // Codes 0xA-0xC would normally assert GPIO2 as mux control, but in GPIO mode
+    // 0101 GPIO2 is an input, so they only select the LED4/5/6 current registers.
+    // U2 drives the actual mux line.
     //
     // 12 FIFO samples per cycle (6 slots × 2 PDs), 25 SPS → 300 samples/sec from U10
-    max86140_spi_write(MAX8614X_REG_LED_SEQ1, 0x91); // {LEDC2=0x9(LED1/B1), LEDC1=0x1(LED1/B0)}
-    max86140_spi_write(MAX8614X_REG_LED_SEQ2, 0xA2); // {LEDC4=0xA(LED2/B1), LEDC3=0x2(LED2/B0)}
-    max86140_spi_write(MAX8614X_REG_LED_SEQ3, 0xB3); // {LEDC6=0xB(LED3/B1), LEDC5=0x3(LED3/B0)}
+    max86140_spi_write(MAX8614X_REG_LED_SEQ1, 0x21); // {LEDC2=0x2, LEDC1=0x1}
+    max86140_spi_write(MAX8614X_REG_LED_SEQ2, 0xA3); // {LEDC4=0xA, LEDC3=0x3}
+    max86140_spi_write(MAX8614X_REG_LED_SEQ3, 0xCB); // {LEDC6=0xC, LEDC5=0xB}
 
     // -------------------------------
-    // GPIO Sync Control — U10 controller/output mode
-    // 0x04: GPIO1 = conversion-start OUTPUT → drives U2 via J15 0-ohm jumper
-    //        GPIO2 = tristate (U10 LEDC codes never assert LED4/5/6, so GPIO2
-    //                          stays safe for the RTC crystal on that pin)
-    // NOTE: U10 still samples freely at 25 SPS on its own clock. The GPIO1
-    //       pulse just tells U2 when each integration window starts.
+    // GPIO Sync Control - U10 = GPIO mode 0101 (datasheet Table 11):
+    //   GPIO1 = controller sample OUTPUT -> U2 via the J15 0-ohm jumper
+    //   GPIO2 = 32768 Hz RTC clock INPUT from XTAL1 on the RTC_CLK net
+    // GPIO2 being an input is what makes this safe: U10 never drives that pin,
+    // so it cannot fight the oscillator. Exposure timing comes from the crystal.
+    // Was 0x04 (mode 0100), where GPIO2 is an output and LEDC codes 0xA-0xC
+    // drove it straight into XTAL1.
     // -------------------------------
-    max86140_spi_write(MAX8614X_REG_PPG_SYNC_CTRL, 0x04);
+    max86140_spi_write(MAX8614X_REG_PPG_SYNC_CTRL, 0x05);
 
     // ---- Readback verify ----
     uint8_t rb_seq1 = max86140_spi_read(MAX8614X_REG_LED_SEQ1);
@@ -462,19 +485,21 @@ void max86140_init(void)
     uint8_t rb_led3 = max86140_spi_read(MAX8614X_REG_LED3_PA);
     uint8_t rb_sync = max86140_spi_read(MAX8614X_REG_PPG_SYNC_CTRL);
     uint8_t rb_bias = max86140_spi_read(MAX8614X_REG_PD_BIAS);
-    LOG_INF("U10 LED_SEQ1=0x%02x(exp 0x91)  SEQ2=0x%02x(exp 0xA2)  SEQ3=0x%02x(exp 0xB3)",
+    uint8_t rb_rng1 = max86140_spi_read(MAX8614X_REG_LED_RANGE1);
+    LOG_INF("U10 LED_SEQ1=0x%02x(exp 0x21)  SEQ2=0x%02x(exp 0x13)  SEQ3=0x%02x(exp 0x32)",
             rb_seq1, rb_seq2, rb_seq3);
     LOG_INF("U10 PPG_CFG1=0x%02x(exp 0x18)  PPG_CFG2=0x%02x  LED1_PA=0x%02x  LED2_PA=0x%02x  LED3_PA=0x%02x",
             rb_cfg1, rb_cfg2, rb_led1, rb_led2, rb_led3);
-    LOG_INF("U10 PPG_SYNC_CTRL=0x%02x(exp 0x04)  PD_BIAS=0x%02x(exp 0x11)", rb_sync, rb_bias);
-    if (rb_seq1 != 0x91 || rb_seq2 != 0xA2 || rb_seq3 != 0xB3) {
+    LOG_INF("U10 PPG_SYNC_CTRL=0x%02x(exp 0x05)  PD_BIAS=0x%02x(exp 0x11)", rb_sync, rb_bias);
+    LOG_INF("U10 LED_RANGE1=0x%02x(exp 0x3F)", rb_rng1);
+    if (rb_seq1 != 0x21 || rb_seq2 != 0x13 || rb_seq3 != 0x32) {
         LOG_ERR("U10 LED_SEQ mismatch — SPI write may have failed!");
     }
-    if (rb_cfg1 != 0x18) {
-        LOG_ERR("U10 PPG_CONFIG1 mismatch — expected 0x18, got 0x%02x", rb_cfg1);
+    if (rb_cfg1 != 0x16) {
+        LOG_ERR("U10 PPG_CONFIG1 mismatch - expected 0x16, got 0x%02x", rb_cfg1);
     }
-    if (rb_sync != 0x04) {
-        LOG_ERR("U10 PPG_SYNC_CTRL mismatch — expected 0x04, got 0x%02x", rb_sync);
+    if (rb_sync != 0x05) {
+        LOG_ERR("U10 PPG_SYNC_CTRL mismatch - expected 0x05, got 0x%02x", rb_sync);
     }
 
     // Start Sampling (exit shutdown)
@@ -504,10 +529,14 @@ void max86140_init(void)
 // U2 FIFO is ignored (we only read U10's FIFO via burst read on CSB1).
 // --------------------------------------------
 
-/* LED sequence constants for U2 — 6-slot full bank scan (same as U10) */
-#define MUX_LED_SEQ1   0x91u  /* LEDC1=0x1(LED1/Bank0), LEDC2=0x9(LED1/Bank1) */
-#define MUX_LED_SEQ2   0xA2u  /* LEDC3=0x2(LED2/Bank0), LEDC4=0xA(LED2/Bank1) */
-#define MUX_LED_SEQ3   0xB3u  /* LEDC5=0x3(LED3/Bank0), LEDC6=0xB(LED3/Bank1) */
+/* U2 drives the MAX4783 select line and nothing else.
+ * GPIO2 is pulled LOW during LED4/5/6 exposures (codes 0xA/0xB/0xC) and sits HIGH
+ * otherwise. Slots 1-3 use 0x1/0x2/0x3 (high) and slots 4-6 use 0xA/0xB/0xC (low),
+ * so the mux moves once per cycle rather than on every slot boundary.
+ * U2's own drivers stay at zero current: LED1/LED3 nets are shared with U10. */
+#define MUX_LED_SEQ1   0x21u  /* slot1=0x1, slot2=0x2  -> GPIO2 HIGH */
+#define MUX_LED_SEQ2   0xA3u  /* slot3=0x3 HIGH, slot4=0xA -> GPIO2 LOW */
+#define MUX_LED_SEQ3   0xCBu  /* slot5=0xB, slot6=0xC  -> GPIO2 LOW */
 
 void max86141_u2_init(void)
 {
@@ -523,18 +552,18 @@ void max86141_u2_init(void)
     _spi_write_u2(MAX8614X_REG_MODE_CONFIG, MAX8614X_MODE_SHDN);
 
     // --- PPG Analog Config (match U10 settings) ---
-    // PPG_CONFIG1: [7]=ALC_DIS(0), [6:4]=PPG_ADC_RGE(001=8192nA), [3:2]=PPG_TINT(10=58.7us), [1:0]=0
-    // Match U10: same 8192 nA full-scale so counts are directly comparable across all 4 PDs
-    _spi_write_u2(MAX8614X_REG_PPG_CONFIG1, 0x18);
+    // Slave (U2): PD3 and PD4 both 4096 nA per the acquisition spec, integration 58.7 us.
+    //   0x02 = 0b0_0_00_00_10
+    // Half the master's full scale, so U2 counts are 2x U10 counts for the same
+    // photocurrent - scale before comparing across chips.
+    _spi_write_u2(MAX8614X_REG_PPG_CONFIG1, 0x02);
     _spi_write_u2(MAX8614X_REG_PPG_CONFIG2, 0x00);   // 25 SPS, SMP_AVG=1x (no averaging)
 
-    // LED_CONFIG: ALL channels must be set to 124mA range, not just LED1.
-    // 0xFF = bits[7:6]=11(12µs settling) | bits[5:4]=11(LED3=124mA)
-    //              | bits[3:2]=11(LED2=124mA)   | bits[1:0]=11(LED1=124mA)
-    // Previously 0xC3 left LED2 and LED3 at 31mA default — IR and Green were
-    // drawing current from the wrong range, producing ~7mA instead of the
-    // intended 14–29mA.
-    _spi_write_u2(MAX8614X_REG_LED_CONFIG, 0xFF);
+    // Register 0x13 = PPG_CONFIG_3, not an LED range register:
+    //   [7:6] LED_SETLNG  [5] DIG_FILT_SEL  [2:1] BURST_RATE  [0] BURST_EN
+    // 0xC0 = 12 us settling, CDM filter, burst mode off - same as U10.
+    // Was 0xFF, which also set BURST_EN=1 at 256 Hz and switched the filter to FDM.
+    _spi_write_u2(MAX8614X_REG_LED_CONFIG, MAX8614X_LED_SETTLING_12US);
     _spi_write_u2(MAX8614X_REG_PD_BIAS, 0x11);       // PD1+PD2 per spec (PD3+PD4 on U2)
 
     // --- LED Pulse Amplitudes for U2's 3 active channels ---
@@ -552,9 +581,14 @@ void max86141_u2_init(void)
     //   Red   14.53 mA: 14.53/62  * 256 = 60  → 0x3C
     //   Green 14.53 mA: 14.53/31  * 256 = 120 → 0x78
     //   IR    29.06 mA: 29.06/62  * 256 = 120 → 0x78
-    _spi_write_u2(MAX8614X_REG_LED1_PA, 0x3C);   // 14.53 mA Red   (62mA range,  PA=60) — matches U10 LED1 current
-    _spi_write_u2(MAX8614X_REG_LED2_PA, 0x78);   // 14.53 mA Green (31mA range,  PA=120)
-    _spi_write_u2(MAX8614X_REG_LED3_PA, 0x78);   // 29.06 mA IR    (62mA range,  PA=120)
+    // U2 must not illuminate: LED1 and LED3 nets carry U10's drivers too, so any
+    // current here fights U10's. U2 exists to work the mux and read PD3/PD4.
+    _spi_write_u2(MAX8614X_REG_LED1_PA, 0x00);
+    _spi_write_u2(MAX8614X_REG_LED2_PA, 0x00);
+    _spi_write_u2(MAX8614X_REG_LED3_PA, 0x00);
+    _spi_write_u2(MAX8614X_REG_LED4_PA, 0x00);
+    _spi_write_u2(MAX8614X_REG_LED5_PA, 0x00);
+    _spi_write_u2(MAX8614X_REG_LED6_PA, 0x00);
 
     // --- FIFO Config ---
     _spi_write_u2(MAX8614X_REG_FIFO_CFG1, MAX8614X_FIFO_A_FULL);
@@ -563,9 +597,9 @@ void max86141_u2_init(void)
     // Slot1: LEDC1=0x01(LED1)  → U2 GPIO2=LOW  → Bank 0 → Red
     // Slot2: LEDC2=0x0B(LED5)  → U2 GPIO2=HIGH → Bank 1 → IR
     // Slot3: LEDC3=0x0A(LED4)  → U2 GPIO2=HIGH → Bank 1 → Green
-    _spi_write_u2(MAX8614X_REG_LED_SEQ1, MUX_LED_SEQ1); // 0x91: LED1/B0, LED1/B1
-    _spi_write_u2(MAX8614X_REG_LED_SEQ2, MUX_LED_SEQ2); // 0xA2: LED2/B0, LED2/B1
-    _spi_write_u2(MAX8614X_REG_LED_SEQ3, MUX_LED_SEQ3); // 0xB3: LED3/B0, LED3/B1
+    _spi_write_u2(MAX8614X_REG_LED_SEQ1, MUX_LED_SEQ1); // 0x21
+    _spi_write_u2(MAX8614X_REG_LED_SEQ2, MUX_LED_SEQ2); // 0xA3
+    _spi_write_u2(MAX8614X_REG_LED_SEQ3, MUX_LED_SEQ3); // 0xCB
 
     // --- GPIO Sync Control — U2 mode ---
     // PRODUCTION (J15 populated):  0x06 = target mode
@@ -581,9 +615,13 @@ void max86141_u2_init(void)
     //   Previously 0x01 but that left U2 FIFO empty — 0x04 is the known-good
     //   self-clocking value since it works for U10.
     //   Switch to 0x06 (target mode, requires J15) once external sync is confirmed.
-#define U2_SYNC_STANDALONE  0x04u   /* self-clocked, GPIO1=sample-start out (same as U10) */
-#define U2_SYNC_TARGET      0x06u   /* target mode — requires J15 */
-    _spi_write_u2(MAX8614X_REG_PPG_SYNC_CTRL, U2_SYNC_STANDALONE);
+#define U2_SYNC_STANDALONE  0x04u   /* self-clocked controller - unsynchronised */
+#define U2_SYNC_TARGET      0x02u   /* GPIO mode 0010: GPIO1 = sample trigger INPUT
+                                     * from U10 via J15, GPIO2 = mux control.
+                                     * NOT 0x06: modes 0110/0111 invert the GPIO2
+                                     * polarity (high during LED4/5/6 instead of low),
+                                     * which would swap both mux banks. */
+    _spi_write_u2(MAX8614X_REG_PPG_SYNC_CTRL, U2_SYNC_TARGET);
 
     // --- Readback verify ---
     uint8_t rb_seq1  = _spi_read_u2(MAX8614X_REG_LED_SEQ1);
@@ -594,17 +632,17 @@ void max86141_u2_init(void)
     uint8_t rb_led2  = _spi_read_u2(MAX8614X_REG_LED2_PA);
     uint8_t rb_led3  = _spi_read_u2(MAX8614X_REG_LED3_PA);
     uint8_t rb_range = _spi_read_u2(MAX8614X_REG_LED_CONFIG);
-    LOG_INF("U2 LED_SEQ1=0x%02x(exp 0x91)  SEQ2=0x%02x(exp 0xA2)  SEQ3=0x%02x(exp 0xB3)  SYNC=0x%02x",
+    LOG_INF("U2 LED_SEQ1=0x%02x(exp 0x21)  SEQ2=0x%02x(exp 0xA3)  SEQ3=0x%02x(exp 0xCB)  SYNC=0x%02x(exp 0x02)",
             rb_seq1, rb_seq2, rb_seq3, rb_sync);
-    LOG_INF("U2 LED1_PA=0x%02x(exp 0x3C/Red)  LED2_PA=0x%02x(exp 0x78/Green)  LED3_PA=0x%02x(exp 0x78/IR)",
+    LOG_INF("U2 LED1_PA=0x%02x(exp 0x00)  LED2_PA=0x%02x(exp 0x00)  LED3_PA=0x%02x(exp 0x00)",
             rb_led1, rb_led2, rb_led3);
-    LOG_INF("U2 LED_CONFIG=0x%02x(exp 0xFF: all-124mA)", rb_range);
+    LOG_INF("U2 PPG_CONFIG_3=0x%02x(exp 0xC0: 12us settling, burst off)", rb_range);
     if (rb_seq1 != MUX_LED_SEQ1 || rb_seq2 != MUX_LED_SEQ2 || rb_seq3 != MUX_LED_SEQ3) {
         LOG_ERR("U2 LED_SEQ mismatch — CSB2 SPI may have failed!");
     }
-    if (rb_led1 < 0x30 || rb_led2 < 0x60 || rb_led3 < 0x60) {
-        LOG_WRN("U2 LED PA lower than expected (LED1=0x%02x LED2=0x%02x LED3=0x%02x)"
-                " — SPI write may have failed or LED_CONFIG range still wrong",
+    if (rb_led1 != 0x00 || rb_led2 != 0x00 || rb_led3 != 0x00) {
+        LOG_ERR("U2 LED PA non-zero (LED1=0x%02x LED2=0x%02x LED3=0x%02x)"
+                " - U2 is driving LEDs U10 also drives; samples will be corrupted",
                 rb_led1, rb_led2, rb_led3);
     }
 
