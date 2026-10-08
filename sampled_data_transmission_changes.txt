@@ -1,0 +1,111 @@
+PPG MONITOR: CHANGES TO SEND THE FULL SAMPLED DATA STREAM
+Prepared: October 8, 2026
+
+Purpose
+-------
+This summarizes the firmware and browser transport changes implemented and
+tested in the earlier "Review max driver and app" task. The main improvement
+was moving from transmitting only the latest PPG frame to forwarding every
+sample drained from both MAX86141 FIFOs.
+
+1. The original problem
+-----------------------
+The firmware read the accumulated samples from U10 and U2, but sent only the
+last 12 samples from each chip during each roughly 200 ms loop. Older samples
+in the same drained batch were not transmitted.
+
+For example, if a chip produced 60 FIFO entries, only 12 were sent: 48 entries,
+or 80% of that batch, were omitted. Reading the FIFO successfully therefore
+did not mean the receiver obtained the complete batch.
+
+This limit had been used to avoid overwhelming BLE with individual text
+notifications. Printing only the first 12 entries in debug logs was a separate
+choice; the actual data loss came from limiting transmission to the last 12.
+
+2. Forward the entire FIFO batch
+-------------------------------
+In src/main.c, the transmit path was changed to pass every drained U10 and U2
+sample to ble_queue_ppg_samples(...), replacing the last-12-samples limit.
+IMU snapshots were grouped through ble_queue_imu_samples(...).
+
+This preserves all PPG entries read in each drain instead of deliberately
+discarding older frames. The IMU change groups the snapshots read by the loop;
+it does not establish capture of every internal IMU conversion.
+
+3. Replace per-sample text messages with binary batches
+-----------------------------------------------------
+Multiple records were packed into each BLE Nordic UART Service notification.
+Records use a compact 4-byte representation containing an identifier and a
+24-bit packed value. Batching is sized to the negotiated BLE payload limit.
+
+The later packet format includes a 6-byte header with a 16-bit sequence number.
+In the successful device log, ATT MTU was 65 bytes and notification payload
+was 62 bytes. That leaves room for up to 14 four-byte records after the header.
+
+Sending multiple records per notification reduces message overhead and makes
+forwarding the full drained stream practical.
+
+4. Buffer acquisition separately from BLE transmission
+------------------------------------------------------
+A dedicated packet queue and BLE sender path were added. Acquisition queues
+data, and the sender drains the queue as BLE capacity becomes available.
+The sender retries on temporary BLE backpressure instead of immediately
+discarding a burst when the stack cannot accept it.
+
+5. Replace heap allocation with a fixed packet pool
+-------------------------------------------------
+The first queued implementation allocated packets with k_malloc. Sustained
+streaming produced allocation failures and dropped packets. Because U10 was
+queued before U2, U2 suffered disproportionately when memory ran out.
+
+The packet path was changed to a preallocated pool of 64 packets, with a free
+packet FIFO and a transmit FIFO. Packet buffers are recycled after use rather
+than repeatedly allocated and freed. U10/U2 batching was also interleaved more
+fairly to reduce starvation of one chip by the other.
+
+Memory usage is now bounded. Pool exhaustion remains a detectable drop
+condition; a fixed pool cannot compensate indefinitely for a link that is
+slower than the incoming data rate.
+
+6. Update the browser to decode the complete batches
+--------------------------------------------------
+In ppg_monitor.html, the parser was updated to recognize binary packets,
+decode their individual PPG/IMU records, and route them through the shared
+processSample(...) path. The legacy text parser was retained for compatibility
+with older firmware.
+
+Packet sequence tracking and per-slot counts were added to help detect gaps
+and imbalanced streams. The visible "BLE seq", "missed packets", and "slot
+balance" text was later removed at your request, while the underlying parsing
+and tracking logic was retained.
+
+7. Add accurate diagnostics and verify the result
+------------------------------------------------
+Firmware counters were corrected to distinguish records attempted from records
+successfully queued. Diagnostics also report dropped packets, sequence number,
+negotiated MTU, and payload size. This avoided treating failed enqueue attempts
+as successfully queued data.
+
+The successful device log supplied in the earlier task included:
+
+BLE transport [fixed-pool]: U10=5448/5448 U2=5460/5460 IMU=504/504 dropped=0 seq=1059 mtu=65 payload=62
+
+Each source is shown as queued/attempted. All attempted records were queued
+in that capture, with zero reported queue drops. You subsequently confirmed
+that everything worked cleanly. Firmware builds were also reported successful
+during that implementation work.
+
+These results support removal of the deliberate PPG truncation and resolution
+of the observed queue starvation. Queue counters alone do not prove that every
+sensor conversion reached the final CSV; that requires matching acquisition,
+receiver, and export counts and checking for sensor FIFO overflow.
+
+Repository version note
+-----------------------
+This is a historical summary, not a claim that the present checkout contains
+these changes. During preparation on October 8, 2026, the ios-dev checkout at
+commit 98d00e3 still contained the older last-12-samples transmit logic in
+src/main.c. The checkout subsequently changed to peripheral_uart_test at
+1ad49bc, where this document was recreated for commit. The summary above is
+based on the earlier implementation task and its device logs. No firmware or
+browser code was changed while preparing this document.
