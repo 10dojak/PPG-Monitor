@@ -31,21 +31,24 @@ struct ChannelSelectView: View {
         }
     }
 
+    // Off chips go fully grey rather than a faded version of their own
+    // color — several channel colors are pale pastels, and a 40%-opacity
+    // pastel was hard to tell apart from an "on" chip at a glance.
     private func chip(_ ds: PPGDataset) -> some View {
         let isOn = bt.datasetVisible[ds.id]
+        let tint = isOn ? ds.color : Color(.systemGray)
         return Text(ds.label)
             .font(.system(size: 11, weight: .semibold))
             .lineLimit(1)
             .minimumScaleFactor(0.8)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .foregroundColor(ds.color)
-            .background(ds.color.opacity(0.12))
+            .foregroundColor(tint)
+            .background(isOn ? ds.color.opacity(0.12) : Color(.systemGray6))
             .clipShape(Capsule())
             .overlay(
                 Capsule().stroke(isOn ? ds.color : .clear, lineWidth: 1.5)
             )
-            .opacity(isOn ? 1.0 : 0.4)
             .onTapGesture {
                 bt.datasetVisible[ds.id].toggle()
             }

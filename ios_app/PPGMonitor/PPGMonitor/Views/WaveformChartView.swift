@@ -56,6 +56,18 @@ struct WaveformChartView: View {
         return visibleDatasets
     }
 
+    // While zoomed in on one channel, the rest still draw (as context) but
+    // greyed out, so the zoomed one is the only colored line.
+    private func isDimmed(_ ds: PPGDataset) -> Bool {
+        zoomedDatasetID != nil && ds.id != zoomedDatasetID
+    }
+
+    // Swift Charts paints series in declaration order — put the zoomed
+    // channel last so the grey lines never draw over it.
+    private var drawOrder: [PPGDataset] {
+        visibleDatasets.filter(isDimmed) + visibleDatasets.filter { !isDimmed($0) }
+    }
+
     // Anchored on the newest sample actually received, not literal
     // wall-clock Date() — keeps auto-follow from drifting ahead of the data
     // during a stall/disconnect.
@@ -129,14 +141,14 @@ struct WaveformChartView: View {
             }
 
             Chart {
-                ForEach(visibleDatasets) { ds in
+                ForEach(drawOrder) { ds in
                     ForEach(bt.channels[ds.channelKey] ?? []) { point in
                         LineMark(
                             x: .value("Time", point.t),
                             y: .value("ADC", point.y),
                             series: .value("Channel", ds.label)
                         )
-                        .foregroundStyle(ds.color)
+                        .foregroundStyle(isDimmed(ds) ? Color(.systemGray3) : ds.color)
                         .lineStyle(StrokeStyle(lineWidth: ds.dashed ? 1.5 : 2, dash: ds.dashed ? [5, 3] : []))
                     }
                 }
