@@ -99,13 +99,3 @@ These results support removal of the deliberate PPG truncation and resolution
 of the observed queue starvation. Queue counters alone do not prove that every
 sensor conversion reached the final CSV; that requires matching acquisition,
 receiver, and export counts and checking for sensor FIFO overflow.
-
-Repository version note
------------------------
-This is a historical summary, not a claim that the present checkout contains
-these changes. During preparation on October 8, 2026, the ios-dev checkout at
-commit 98d00e3 still contained the older last-12-samples transmit logic in
-src/main.c. The checkout subsequently changed to peripheral_uart_test at
-1ad49bc, where this document was recreated for commit. The summary above is
-based on the earlier implementation task and its device logs. No firmware or
-browser code was changed while preparing this document.
