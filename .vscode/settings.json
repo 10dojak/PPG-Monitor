@@ -6,5 +6,7 @@
         "**/.DS_Store": true,
         "**/Thumbs.db": true
     },
-    "hide-files.files": []
+    "hide-files.files": [],
+    "nrf-connect.topdir": "${nrf-connect.sdk:3.2.4}",
+    "nrf-connect.toolchain.path": "${nrf-connect.toolchain:3.1.20251128}"
 }
