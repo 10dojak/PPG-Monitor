@@ -293,6 +293,35 @@ static uint8_t _spi_read_u2(uint8_t reg_addr)
 #define MAX8614X_REG_MODE_CONFIG       0x0D
 // PPG Configuration
 #define MAX8614X_REG_PPG_SYNC_CTRL     0x10
+/* ------------------------------------------------------------------------
+ * DIAGNOSTIC 2026-10-13 -- AMBIENT BACKGROUND TEST
+ *
+ * Set to 1 to measure what reaches the photodiodes with no illumination:
+ *   - all six LED currents on U10 forced to 0x00 (no LED fires at all)
+ *   - ALC_DISABLE set on BOTH chips, so the analog ambient-light
+ *     cancellation stops subtracting the background before the ADC
+ *
+ * ALC matters here.  It is rated to cancel up to 200uA, about 6x the widest
+ * ADC range, so with it enabled a background measurement shows only the
+ * RESIDUAL after cancellation -- typically near zero -- and would hide tens
+ * of microamps of real ambient.  Disabling it makes the ADC read the actual
+ * photocurrent.
+ *
+ * Everything else is untouched: same slot sequence, same mux, same exposure
+ * sync, same 8192nA ranges, same integration time.  Readings are therefore
+ * directly comparable with a normal capture.
+ *
+ * Set back to 0 to restore normal operation.  This is a measurement mode,
+ * not a fix.
+ * ------------------------------------------------------------------------ */
+#define AMBIENT_BACKGROUND_TEST  0
+
+#if AMBIENT_BACKGROUND_TEST
+#define PPG_CFG1_VALUE  0x96u   /* 0b1_0_01_01_10 : ALC OFF, 8192nA, 58.7us */
+#else
+#define PPG_CFG1_VALUE  0x16u   /* 0b0_0_01_01_10 : ALC ON,  8192nA, 58.7us */
+#endif
+
 #define MAX8614X_REG_PPG_CONFIG1       0x11
 #define MAX8614X_REG_PPG_CONFIG2       0x12
 #define MAX8614X_REG_LED_CONFIG        0x13
@@ -397,7 +426,7 @@ void max86140_init(void)
     //   0x16 = 0b0_0_01_01_10
     // Was 0x18, which the old comment mislabelled: that is PD1 at 16384 nA and
     // only 14.8 us of integration, not the 8192 nA / 58.7 us it claimed.
-    max86140_spi_write(MAX8614X_REG_PPG_CONFIG1, 0x16);
+    max86140_spi_write(MAX8614X_REG_PPG_CONFIG1, PPG_CFG1_VALUE);
 
     // PPG_CONFIG2: bits[7:3]=PPG_SR(00000=25SPS), bits[2:0]=SMP_AVG(000=1x no averaging)
     // 0x03 was wrong — SMP_AVG=011=8x giving only 3.125 SPS output instead of 25 SPS
@@ -417,6 +446,17 @@ void max86140_init(void)
     // PPG1(PD1)=8192nA, PPG2(PD2)=8192nA — tags 01-03 and 07-09 expected in FIFO
     max86140_spi_write(MAX8614X_REG_PD_BIAS, 0x11); // Bias PD1 + PD2
 
+#if AMBIENT_BACKGROUND_TEST
+    /* All LEDs off -- every slot still runs and still reports, but nothing
+     * is illuminated, so each channel reads its own background. */
+    max86140_spi_write(MAX8614X_REG_LED1_PA, 0x00);
+    max86140_spi_write(MAX8614X_REG_LED2_PA, 0x00);
+    max86140_spi_write(MAX8614X_REG_LED3_PA, 0x00);
+    max86140_spi_write(MAX8614X_REG_LED4_PA, 0x00);
+    max86140_spi_write(MAX8614X_REG_LED5_PA, 0x00);
+    max86140_spi_write(MAX8614X_REG_LED6_PA, 0x00);
+    LOG_WRN("AMBIENT BACKGROUND TEST ACTIVE - all LEDs off, ALC disabled");
+#else
     // LED currents per firmware spec (124/256 * N mA):
     max86140_spi_write(MAX8614X_REG_LED1_PA, 0x1E); // 14.53 mA  Red 655   (1st)
     max86140_spi_write(MAX8614X_REG_LED2_PA, 0x3C); // 29.06 mA  Green 525 (1st)
@@ -424,6 +464,7 @@ void max86140_init(void)
     max86140_spi_write(MAX8614X_REG_LED4_PA, 0x1E); // 14.53 mA  IR 940    (1st)
     max86140_spi_write(MAX8614X_REG_LED5_PA, 0x1E); // 14.53 mA  IR 940    (2nd)
     max86140_spi_write(MAX8614X_REG_LED6_PA, 0x3C); // 29.06 mA  Green 525 (2nd)
+#endif
 
     // -------------------------------
     // FIFO Configuration
@@ -472,7 +513,15 @@ void max86140_init(void)
     // Was 0x04 (mode 0100), where GPIO2 is an output and LEDC codes 0xA-0xC
     // drove it straight into XTAL1.
     // -------------------------------
-    max86140_spi_write(MAX8614X_REG_PPG_SYNC_CTRL, 0x05);
+    // 2026-10-13: 0x05 -> 0x08.  GPIO mode 1000 = "Active Output Controller
+    // Exposure Output" on GPIO1 + "Input 32768/32000Hz Clock Input" on GPIO2.
+    // Same pins as mode 0101, but GPIO1 now pulses once per EXPOSURE instead of
+    // once per sample, which is what U2 needs in mode 0110 to take its exposure
+    // timing from this crystal instead of its own internal oscillator.
+    // Datasheet (0x10): "GPIO_CTRL register for both the devices should be
+    // programmed to be either Sample Trigger or Exposure Trigger."  Pairs with
+    // U2_SYNC_TARGET = 0x06 below; the two must be changed together.
+    max86140_spi_write(MAX8614X_REG_PPG_SYNC_CTRL, 0x08);
 
     // ---- Readback verify ----
     uint8_t rb_seq1 = max86140_spi_read(MAX8614X_REG_LED_SEQ1);
@@ -486,20 +535,21 @@ void max86140_init(void)
     uint8_t rb_sync = max86140_spi_read(MAX8614X_REG_PPG_SYNC_CTRL);
     uint8_t rb_bias = max86140_spi_read(MAX8614X_REG_PD_BIAS);
     uint8_t rb_rng1 = max86140_spi_read(MAX8614X_REG_LED_RANGE1);
-    LOG_INF("U10 LED_SEQ1=0x%02x(exp 0x21)  SEQ2=0x%02x(exp 0x13)  SEQ3=0x%02x(exp 0x32)",
+    LOG_INF("U10 LED_SEQ1=0x%02x(exp 0x21)  SEQ2=0x%02x(exp 0xA3)  SEQ3=0x%02x(exp 0xCB)",
             rb_seq1, rb_seq2, rb_seq3);
-    LOG_INF("U10 PPG_CFG1=0x%02x(exp 0x18)  PPG_CFG2=0x%02x  LED1_PA=0x%02x  LED2_PA=0x%02x  LED3_PA=0x%02x",
-            rb_cfg1, rb_cfg2, rb_led1, rb_led2, rb_led3);
-    LOG_INF("U10 PPG_SYNC_CTRL=0x%02x(exp 0x05)  PD_BIAS=0x%02x(exp 0x11)", rb_sync, rb_bias);
+    LOG_INF("U10 PPG_CFG1=0x%02x(exp 0x%02x)  PPG_CFG2=0x%02x  LED1_PA=0x%02x  LED2_PA=0x%02x  LED3_PA=0x%02x",
+            rb_cfg1, PPG_CFG1_VALUE, rb_cfg2, rb_led1, rb_led2, rb_led3);
+    LOG_INF("U10 PPG_SYNC_CTRL=0x%02x(exp 0x08)  PD_BIAS=0x%02x(exp 0x11)", rb_sync, rb_bias);
     LOG_INF("U10 LED_RANGE1=0x%02x(exp 0x3F)", rb_rng1);
-    if (rb_seq1 != 0x21 || rb_seq2 != 0x13 || rb_seq3 != 0x32) {
+    if (rb_seq1 != 0x21 || rb_seq2 != 0xA3 || rb_seq3 != 0xCB) {
         LOG_ERR("U10 LED_SEQ mismatch — SPI write may have failed!");
     }
-    if (rb_cfg1 != 0x16) {
-        LOG_ERR("U10 PPG_CONFIG1 mismatch - expected 0x16, got 0x%02x", rb_cfg1);
+    if (rb_cfg1 != PPG_CFG1_VALUE) {
+        LOG_ERR("U10 PPG_CONFIG1 mismatch - expected 0x%02x, got 0x%02x",
+                PPG_CFG1_VALUE, rb_cfg1);
     }
-    if (rb_sync != 0x05) {
-        LOG_ERR("U10 PPG_SYNC_CTRL mismatch - expected 0x05, got 0x%02x", rb_sync);
+    if (rb_sync != 0x08) {
+        LOG_ERR("U10 PPG_SYNC_CTRL mismatch - expected 0x08, got 0x%02x", rb_sync);
     }
 
     // Start Sampling (exit shutdown)
@@ -552,11 +602,25 @@ void max86141_u2_init(void)
     _spi_write_u2(MAX8614X_REG_MODE_CONFIG, MAX8614X_MODE_SHDN);
 
     // --- PPG Analog Config (match U10 settings) ---
-    // Slave (U2): PD3 and PD4 both 4096 nA per the acquisition spec, integration 58.7 us.
-    //   0x02 = 0b0_0_00_00_10
-    // Half the master's full scale, so U2 counts are 2x U10 counts for the same
-    // photocurrent - scale before comparing across chips.
-    _spi_write_u2(MAX8614X_REG_PPG_CONFIG1, 0x02);
+    // PPG_CONFIG1 (0x11) field layout, datasheet p.68:
+    //   bit 7     ALC_DISABLE      0 = ambient light cancellation ENABLED
+    //   bit 6     ADD_OFFSET       0 = no dark-current offset
+    //   bits[5:4] PPG2_ADC_RGE     01 = 8192 nA  (PD4)
+    //   bits[3:2] PPG1_ADC_RGE     01 = 8192 nA  (PD3)
+    //   bits[1:0] PPG_TINT         10 = 58.7 us integration
+    //   0x16 = 0b0_0_01_01_10  -- byte-identical to U10.
+    //
+    // 2026-10-13: was 0x02 (both ranges 00 = 4096 nA), i.e. half U10's full
+    // scale, which meant U2 counts had to be scaled by 2x before comparing
+    // across chips.  That asymmetry was harmless while U2's slot 3/4/5 data was
+    // corrupted, but once the exposure-sync fix made PD3/PD4 read properly, the
+    // extra sensitivity put 7 of U2's 12 channels on the rail at 524287.
+    // Matching U10 halves every U2 reading and gives identical scaling on both
+    // chips, so counts are directly comparable with no conversion.
+    //
+    // PPG_TINT is unchanged at 10: the datasheet requires it be identical
+    // across a controller/target pair, as does PPG_SR in PPG_CONFIG2 below.
+    _spi_write_u2(MAX8614X_REG_PPG_CONFIG1, PPG_CFG1_VALUE);
     _spi_write_u2(MAX8614X_REG_PPG_CONFIG2, 0x00);   // 25 SPS, SMP_AVG=1x (no averaging)
 
     // Register 0x13 = PPG_CONFIG_3, not an LED range register:
@@ -616,11 +680,33 @@ void max86141_u2_init(void)
     //   self-clocking value since it works for U10.
     //   Switch to 0x06 (target mode, requires J15) once external sync is confirmed.
 #define U2_SYNC_STANDALONE  0x04u   /* self-clocked controller - unsynchronised */
-#define U2_SYNC_TARGET      0x02u   /* GPIO mode 0010: GPIO1 = sample trigger INPUT
+#define U2_SYNC_TARGET      0x06u   /* GPIO mode 0110: GPIO1 = EXPOSURE trigger INPUT
                                      * from U10 via J15, GPIO2 = mux control.
-                                     * NOT 0x06: modes 0110/0111 invert the GPIO2
-                                     * polarity (high during LED4/5/6 instead of low),
-                                     * which would swap both mux banks. */
+                                     *
+                                     * 2026-10-13: was 0x02 (mode 0010).  Both modes
+                                     * keep mux control on GPIO2, but 0010 says
+                                     * "Exposure timing is controlled by internal
+                                     * oscillator" while 0110 says "Both sample and
+                                     * exposure timing is controlled by the GPIO1
+                                     * input".  Only 0110 puts U2's exposures on
+                                     * U10's 32.768kHz crystal.  U2 free-running on
+                                     * its own oscillator is the surviving suspect
+                                     * for the slot 3/4/5 corruption (the read-order
+                                     * diagnostic ruled out the SPI read path).
+                                     * Requires U10 PPG_SYNC_CTRL = 0x08 (mode 1000,
+                                     * controller exposure output).
+                                     *
+                                     * The earlier note here claimed 0110 inverts the
+                                     * GPIO2 mux polarity.  That came from Table 12,
+                                     * which says GPIO2 is HIGH during LED4/5/6.
+                                     * Table 13 describes the SAME mode 0110 as LOW
+                                     * during LED4/5/6, identical to 0010.  The
+                                     * datasheet contradicts itself.  If Table 12 is
+                                     * right the two mux banks swap, which shows up
+                                     * at once as wrong colours per slot and is fixed
+                                     * by swapping the LEDC groups in LED_SEQ1/2/3 --
+                                     * it does not corrupt data.  Verify from a
+                                     * capture rather than from the tables. */
     _spi_write_u2(MAX8614X_REG_PPG_SYNC_CTRL, U2_SYNC_TARGET);
 
     // --- Readback verify ---
@@ -632,13 +718,25 @@ void max86141_u2_init(void)
     uint8_t rb_led2  = _spi_read_u2(MAX8614X_REG_LED2_PA);
     uint8_t rb_led3  = _spi_read_u2(MAX8614X_REG_LED3_PA);
     uint8_t rb_range = _spi_read_u2(MAX8614X_REG_LED_CONFIG);
-    LOG_INF("U2 LED_SEQ1=0x%02x(exp 0x21)  SEQ2=0x%02x(exp 0xA3)  SEQ3=0x%02x(exp 0xCB)  SYNC=0x%02x(exp 0x02)",
+    uint8_t rb_cfg1  = _spi_read_u2(MAX8614X_REG_PPG_CONFIG1);
+    uint8_t rb_cfg2  = _spi_read_u2(MAX8614X_REG_PPG_CONFIG2);
+    LOG_INF("U2 LED_SEQ1=0x%02x(exp 0x21)  SEQ2=0x%02x(exp 0xA3)  SEQ3=0x%02x(exp 0xCB)  SYNC=0x%02x(exp 0x06)",
             rb_seq1, rb_seq2, rb_seq3, rb_sync);
     LOG_INF("U2 LED1_PA=0x%02x(exp 0x00)  LED2_PA=0x%02x(exp 0x00)  LED3_PA=0x%02x(exp 0x00)",
             rb_led1, rb_led2, rb_led3);
     LOG_INF("U2 PPG_CONFIG_3=0x%02x(exp 0xC0: 12us settling, burst off)", rb_range);
+    LOG_INF("U2 PPG_CFG1=0x%02x(exp 0x%02x: 8192nA both PDs, 58.7us)  PPG_CFG2=0x%02x(exp 0x00)",
+            rb_cfg1, PPG_CFG1_VALUE, rb_cfg2);
     if (rb_seq1 != MUX_LED_SEQ1 || rb_seq2 != MUX_LED_SEQ2 || rb_seq3 != MUX_LED_SEQ3) {
         LOG_ERR("U2 LED_SEQ mismatch — CSB2 SPI may have failed!");
+    }
+    if (rb_cfg1 != PPG_CFG1_VALUE) {
+        LOG_ERR("U2 PPG_CONFIG1 mismatch - expected 0x%02x, got 0x%02x",
+                PPG_CFG1_VALUE, rb_cfg1);
+    }
+    if (rb_sync != U2_SYNC_TARGET) {
+        LOG_ERR("U2 PPG_SYNC_CTRL mismatch - expected 0x%02x, got 0x%02x",
+                U2_SYNC_TARGET, rb_sync);
     }
     if (rb_led1 != 0x00 || rb_led2 != 0x00 || rb_led3 != 0x00) {
         LOG_ERR("U2 LED PA non-zero (LED1=0x%02x LED2=0x%02x LED3=0x%02x)"

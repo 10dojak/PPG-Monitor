@@ -764,6 +764,28 @@ static void debug_imu_i2c(void)
     }
 }
 
+/* Index of the most recent COMPLETE 12-sample cycle that begins on tag 1,
+ * or -1 if the buffer holds no such cycle.
+ *
+ * The FIFO interleaves the two photodiodes within each LED slot, so one full
+ * cycle on the wire is
+ *     tag1 tag7 tag2 tag8 tag3 tag9 tag4 tag10 tag5 tag11 tag6 tag12
+ * (verified empirically, 134 lines, zero violations).  Taking the last 12
+ * samples unconditionally lands wherever the FIFO happened to be drained, so
+ * roughly one batch in three started mid-cycle and the 12 values arrived
+ * rotated by 4 or 8 positions.  Walking back to a tag-1 boundary fixes that.
+ *
+ * Searching from the newest end downwards returns the freshest aligned frame. */
+static int frame_start(const uint32_t *buf, uint8_t n)
+{
+	for (int st = (int)n - 12; st >= 0; st--) {
+		if (((buf[st] >> 19) & 0x1F) == 1u) {
+			return st;
+		}
+	}
+	return -1;
+}
+
 int main(void)
 {
 	int err = 0;
@@ -831,10 +853,16 @@ int main(void)
 
 	max86140_spi_init();
 	LOG_INF("SPI init done");
-	max86140_init();
-	LOG_INF("U10 (primary) sensor init done");
+	/* MAX86141 datasheet, PPG Sync Control (0x10): "It is also important to
+	 * configure the Target first and then the Controller."  U2 is the target
+	 * (GPIO_CTRL 0110, exposure trigger in); U10 is the controller (1000,
+	 * exposure out).  This used to run the other way round, which left U2 starting its
+	 * exposure sequence against an already-running controller with no defined
+	 * phase.  Suspected contributor to the slot 3/4/5 sample corruption on U2. */
 	max86141_u2_init();
-	LOG_INF("U2 (mux controller) init done - streaming PPG Red/IR/Green");
+	LOG_INF("U2 (mux controller / target) init done");
+	max86140_init();
+	LOG_INF("U10 (primary / controller) sensor init done - streaming");
 
 	/* Read Part ID to confirm SPI is actually talking to the sensor */
 	uint8_t part_id = max86140_read_part_id();
@@ -848,6 +876,8 @@ int main(void)
 	k_sleep(K_MSEC(1000));
 	{
 		uint8_t sc = 0, sc2 = 0;
+		/* MAX86141 datasheet, PPG Sync Control (0x10): "When interrupt is asserted
+		 * read the Controller first and then the Target."  U10 is the controller. */
 		max86140_exhaust_fifo(fifo_data_buf, &sc);
 		max86141_u2_exhaust_fifo(fifo_u2_buf, &sc2);
 		LOG_INF("=== Startup tag histogram — U10 (%u samples) ===", sc);
@@ -858,6 +888,19 @@ int main(void)
 
 	for (;;) {
 		uint8_t sample_count = 0, sample_count_u2 = 0;
+		/* Read order: controller (U10) first, then target (U2).  Required by the
+		 * MAX86141 datasheet, PPG Sync Control (0x10): "When interrupt is asserted
+		 * read the Controller first and then the Target.  Read same number of
+		 * items from both devices."
+		 *
+		 * A diagnostic on 2026-10-13 ran this the other way round (U2 first) to
+		 * separate two explanations of the slot 3/4/5 corruption on U2, which were
+		 * stuck to the same chip: U2 has no crystal, AND U2 was read second.
+		 * Result: the corruption stayed entirely on U2 (29% bad on slots 3/4/5,
+		 * photodiode pair collapsed to 1.4% median disagreement) while U10, now
+		 * read second, was clean (0/48 bad, pairs 92.4% apart).  The SPI read path
+		 * is therefore not the cause; the chip's own exposure timing is.  That is
+		 * what the PPG_SYNC_CTRL change to exposure-trigger mode addresses. */
 		max86140_exhaust_fifo(fifo_data_buf, &sample_count);
 		max86141_u2_exhaust_fifo(fifo_u2_buf, &sample_count_u2);
 
@@ -866,15 +909,28 @@ int main(void)
 			LOG_INF("U10 FIFO=%u  U2 FIFO=%u  conn=%s",
 				sample_count, sample_count_u2,
 				(current_conn != NULL) ? "yes" : "no");
-			for (uint8_t i = 0; i < sample_count && i < 12; i++) {
-				uint8_t  tag = (uint8_t)((fifo_data_buf[i] >> 19) & 0x1F);
-				uint32_t val = fifo_data_buf[i] & 0x7FFFFu;
-				LOG_INF("  U10 slot[%u] tag%02u val=%6u", i, tag, val);
+			/* pos[N] is the position within one aligned 12-sample cycle,
+			 * NOT an LED slot: the cycle interleaves both photodiodes, so
+			 * pos 0 and 1 are the two reads of LED slot 1, and so on. */
+			int lg10 = frame_start(fifo_data_buf, sample_count);
+			int lg2  = frame_start(fifo_u2_buf,  sample_count_u2);
+			if (lg10 >= 0) {
+				for (uint8_t i = 0; i < 12; i++) {
+					uint8_t  tag = (uint8_t)((fifo_data_buf[lg10 + i] >> 19) & 0x1F);
+					uint32_t val = fifo_data_buf[lg10 + i] & 0x7FFFFu;
+					LOG_INF("  U10 pos[%2u] tag%02u val=%6u", i, tag, val);
+				}
+			} else {
+				LOG_WRN("U10 no aligned frame in %u samples", sample_count);
 			}
-			for (uint8_t i = 0; i < sample_count_u2 && i < 12; i++) {
-				uint8_t  tag = (uint8_t)((fifo_u2_buf[i] >> 19) & 0x1F);
-				uint32_t val = fifo_u2_buf[i] & 0x7FFFFu;
-				LOG_INF("  U2  slot[%u] tag%02u val=%6u", i, tag, val);
+			if (lg2 >= 0) {
+				for (uint8_t i = 0; i < 12; i++) {
+					uint8_t  tag = (uint8_t)((fifo_u2_buf[lg2 + i] >> 19) & 0x1F);
+					uint32_t val = fifo_u2_buf[lg2 + i] & 0x7FFFFu;
+					LOG_INF("  U2  pos[%2u] tag%02u val=%6u", i, tag, val);
+				}
+			} else {
+				LOG_WRN("U2  no aligned frame in %u samples", sample_count_u2);
 			}
 		}
 
@@ -946,16 +1002,36 @@ int main(void)
 			}
 
 		if (current_conn != NULL) {
-			/* Transmit only the most recent complete cycle (12 slots) from U10.
+			/* Transmit only the most recent complete cycle (12 slots) per chip.
 			 * Sending all 60 accumulated samples floods the BLE NUS TX queue and
-			 * causes bt_nus_send() to fail on every packet. One cycle = 12 samples. */
-			uint8_t u10_start = (sample_count > 12) ? sample_count - 12 : 0;
-			for (uint8_t i = u10_start; i < sample_count; i++)
-				al_transmit_data(fifo_data_buf[i], (uint8_t)(i - u10_start));
-			/* U2 similarly — indices 128..139 reserved for chip-1 data */
-			uint8_t u2_start = (sample_count_u2 > 12) ? sample_count_u2 - 12 : 0;
-			for (uint8_t i = u2_start; i < sample_count_u2; i++)
-				al_transmit_data(fifo_u2_buf[i], (uint8_t)(128u + i - u2_start));
+			 * causes bt_nus_send() to fail on every packet. One cycle = 12 samples.
+			 *
+			 * Each chip sends exactly one cycle aligned to its own tag-1
+			 * boundary, so the receiver always gets the 12 values in the fixed
+			 * interleave order and never a rotated frame.  Both windows are 12
+			 * long by construction, which also satisfies the datasheet's "Read
+			 * same number of items from both devices" for a controller/target
+			 * pair.  An earlier attempt equalised the window LENGTHS with
+			 * MIN(sample_count, sample_count_u2) but never aligned them, so the
+			 * rotation survived.
+			 *
+			 * A batch is skipped outright rather than sent partial or rotated:
+			 * at ~60 samples per 200ms loop an aligned cycle is essentially
+			 * always present, so this only bites in the first loops before the
+			 * FIFOs fill. */
+			int tx10 = frame_start(fifo_data_buf, sample_count);
+			int tx2  = frame_start(fifo_u2_buf,  sample_count_u2);
+
+			if (tx10 >= 0 && tx2 >= 0) {
+				for (uint8_t i = 0; i < 12; i++)
+					al_transmit_data(fifo_data_buf[tx10 + i], i);
+				/* indices 128..139 reserved for chip-1 data */
+				for (uint8_t i = 0; i < 12; i++)
+					al_transmit_data(fifo_u2_buf[tx2 + i], (uint8_t)(128u + i));
+			} else {
+				LOG_WRN("skipped batch: no aligned frame (U10 %u, U2 %u samples)",
+					sample_count, sample_count_u2);
+			}
 		}
 		k_sleep(K_MSEC(200));
 	}
